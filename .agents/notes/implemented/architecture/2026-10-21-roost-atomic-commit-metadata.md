@@ -111,6 +111,12 @@ when history is intact. The test now checks Native Turn sequence totals, exporte
 update bytes and decoded index entries, retaining the same 1 MiB history bound,
 128 complete 82-byte receipts, unchanged-field content and reopen/retry checks.
 Projection record-count bounds remain physical because that layout is unchanged.
+The post-seal state regression now exports individual updates through Native as
+well: a direct SQL query would return no packed updates and let its byte-stability
+checks pass vacuously. Both tests check complete decoded batches and nonempty
+history; the post-seal test keeps immutable prior bytes, no sealed-Turn writes,
+and the original total/per-update growth limits. No assertion is relaxed to fit
+compression.
 This changes tests only, works with both the v8 candidate and v9 candidate, and
 adds no runtime format reader, dependency update or migration. Package publication
 and the exact dependency update required above remain separate release steps.

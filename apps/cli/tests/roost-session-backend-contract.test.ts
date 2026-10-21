@@ -65,7 +65,7 @@ import {
   applySessionHistoryPatches,
   type HistoryImportInput,
 } from '@lody/shared/session-data';
-import { Identity } from '@loro-dev/roost';
+import { decodeBatch, Identity } from '@loro-dev/roost';
 import { RoostNativeClient, RoostHostError } from '@loro-dev/roost-node';
 import { describeRoostHistoryFailure } from '../src/session/roost-history-diagnostics';
 import { RoostHistoryGeneration } from '../src/session/roost-history-generation';
@@ -1184,8 +1184,7 @@ describe('Production Roost history semantics', () => {
         );
         expect(response.success).toBe(true);
         const changes = SessionHistoryChangesSchema.parse(response.result);
-        if (changes.state !== 'ready' || !changes.patches)
-          throw new Error('Expected native patches');
+        if (changes.state !== 'ready' || !changes.patches) throw new Error('Expected native patches');
         expect(changes.patches.baseCheckpoint).toBe(checkpoint);
         expect(changes.patches.turns.map((row) => row.turnId)).toEqual([turn.id]);
         expect(changes.bodies).toEqual({ changed: [], suffix: [] });
@@ -1379,146 +1378,117 @@ describe('Production Roost history semantics', () => {
 
   it('reads legacy whole-message states across reopen and converts only the next mutation', async () => {
     let fixture = await nativeFixture();
-    const turn = {
-      ...nativeAssistant('legacy-state'),
-      finished: true,
-      items: [{ type: 'text' as const, text: 'sealed body' }],
-    };
+    const turn = { ...nativeAssistant('legacy-state'), finished: true,
+      items: [{ type: 'text' as const, text: 'sealed body' }] };
     await fixture.backend.appendHistoryTurn(turn);
     const legacy = { ...turn, items: [{ type: 'text' as const, text: 'legacy correction' }] };
     const batch = NodeLodyHistory.prototype.commitHistoryBatch;
-    const previous = vi
-      .spyOn(NodeLodyHistory.prototype, 'commitHistoryBatch')
-      .mockImplementation(async function (batchId, commands, options) {
-        return batch.call(
-          this,
-          batchId,
-          commands.map((command) =>
-            command.type === 'accept' && command.identity.segmentId.startsWith('state:')
-              ? { ...command, content: encodeRoostContent(legacy) }
-              : command
-          ),
-          options
-        );
-      });
+    const previous = vi.spyOn(NodeLodyHistory.prototype, 'commitHistoryBatch').mockImplementation(async function (batchId, commands, options) {
+      return batch.call(this, batchId, commands.map(command =>
+        command.type === 'accept' && command.identity.segmentId.startsWith('state:')
+          ? { ...command, content: encodeRoostContent(legacy) } : command
+      ), options);
+    });
     try {
-      await fixture.backend.applyHistoryAction({
-        kind: 'assistant-items',
-        turnId: turn.id,
-        mode: 'replace',
-        items: legacy.items,
-      });
-    } finally {
-      previous.mockRestore();
-    }
+      await fixture.backend.applyHistoryAction({ kind: 'assistant-items', turnId: turn.id,
+        mode: 'replace', items: legacy.items });
+    } finally { previous.mockRestore(); }
     const sessionId = fixture.doc.sessionId;
     await fixture.close();
     fixture = await nativeFixture(sessionId);
     expect(await fixture.backend.readTurn(turn.id)).toMatchObject({ state: 'ready', turn: legacy });
     const items = [{ type: 'text' as const, text: 'next correction 🙂' }];
-    await fixture.backend.applyHistoryAction({
-      kind: 'assistant-items',
-      turnId: turn.id,
-      mode: 'replace',
-      items,
-    });
+    await fixture.backend.applyHistoryAction({ kind: 'assistant-items', turnId: turn.id,
+      mode: 'replace', items });
     await fixture.close();
     fixture = await nativeFixture(sessionId);
     expect(await fixture.backend.readTurn(turn.id)).toMatchObject({
-      state: 'ready',
-      turn: { ...legacy, items },
+      state: 'ready', turn: { ...legacy, items },
     });
   });
 
   it('keeps post-seal state updates bounded and recovers a lost first-state reply', async () => {
     const fixture = await nativeFixture();
     const untouched = 'sealed synthetic tool body '.repeat(16384);
-    const tool = {
-      type: 'tool_call' as const,
-      toolCallId: 'large-tool',
-      status: 'completed' as const,
-      title: 'Synthetic tool',
-      rawOutput: { text: untouched },
-    };
+    const tool = { type: 'tool_call' as const, toolCallId: 'large-tool', status: 'completed' as const,
+      title: 'Synthetic tool', rawOutput: { text: untouched } };
     const turn = {
       ...nativeAssistant('sealed-state-budget'),
-      items: [tool, { type: 'text' as const, text: 'base🙂' }],
+      items: [
+        tool,
+        { type: 'text' as const, text: 'base🙂' },
+      ],
     };
     let primaryId: Uint8Array | undefined;
     const accept = NodeLodyHistory.prototype.acceptToView;
-    const capture = vi
-      .spyOn(NodeLodyHistory.prototype, 'acceptToView')
-      .mockImplementation(async function (...args) {
-        const result = await accept.apply(this, args);
-        if (args[0].input.businessId === turn.id) primaryId = result.turnId.slice();
-        return result;
-      });
-    try {
-      await fixture.backend.appendHistoryTurn(turn);
-    } finally {
-      capture.mockRestore();
-    }
-    if (!primaryId) throw new Error('Expected primary');
-    await fixture.backend.applyHistoryAction({
-      kind: 'finish-assistant',
-      turnId: turn.id,
-      endedAt: 42,
+    const capture = vi.spyOn(NodeLodyHistory.prototype, 'acceptToView').mockImplementation(async function (...args) {
+      const result = await accept.apply(this, args);
+      if (args[0].input.businessId === turn.id) primaryId = result.turnId.slice();
+      return result;
     });
-    const updates = () => {
-      const db = new Database(join(nativeDirectory, 'history.db'), { readonly: true });
+    try { await fixture.backend.appendHistoryTurn(turn); }
+    finally { capture.mockRestore(); }
+    if (!primaryId) throw new Error('Expected primary');
+    await fixture.backend.applyHistoryAction({ kind: 'finish-assistant', turnId: turn.id, endedAt: 42 });
+    const updates = async () => {
+      const dbPath = join(nativeDirectory, 'history.db');
+      const seed = await loadRoostOwnerSeedLegacy(dbPath);
+      const reader = new RoostNativeClient({
+        dbPath,
+        seed,
+        allowedOwners: [Identity.fromSeed(seed).owner()],
+        maxQueuedRequests: 32,
+        maxQueuedBytes: 8 * 1024 * 1024,
+      });
       try {
-        const kv =
-          '(SELECT roost_spaces.name AS space, key, value FROM roost_kv JOIN roost_spaces ON roost_spaces.id = roost_kv.space_id)';
-        return db
-          .prepare(`SELECT key, value FROM ${kv} WHERE space LIKE ?`)
-          .all(`%${fixture.doc.sessionId}%:updates`) as { key: Buffer; value: Buffer }[];
+        await reader.ready;
+        const stream = reader.stream(`lody-session:${fixture.doc.sessionId}`);
+        const headers = await stream.latestTurnHeaders(256n);
+        expect(headers.length).toBeLessThan(256);
+        const rows: { key: Buffer; value: Buffer }[] = [];
+        for (const header of headers) {
+          expect(header.nextSeq).toBeLessThan(4096n);
+          for (let seq = 0n; seq < header.nextSeq; seq++) {
+            const value = Buffer.from(await stream.exportUpdates(header.turnId, seq, 1n));
+            expect(decodeBatch(value)).toHaveLength(1);
+            const key = Buffer.alloc(24);
+            key.set(header.turnId);
+            key.writeBigUInt64BE(seq, 16);
+            rows.push({ key, value });
+          }
+        }
+        return rows;
       } finally {
-        db.close();
+        await reader.close();
       }
     };
-    const before = new Map(updates().map((row) => [row.key.toString('hex'), row.value]));
+    const before = new Map((await updates()).map(row => [row.key.toString('hex'), row.value]));
+    expect(before.size).toBeGreaterThan(0);
     let items = turn.items;
     const batch = NodeLodyHistory.prototype.commitHistoryBatch;
-    const lost = vi
-      .spyOn(NodeLodyHistory.prototype, 'commitHistoryBatch')
-      .mockImplementationOnce(async function (...args) {
-        await batch.apply(this, args);
-        throw new Error('Lost first-state reply');
-      });
+    const lost = vi.spyOn(NodeLodyHistory.prototype, 'commitHistoryBatch').mockImplementationOnce(async function (...args) {
+      await batch.apply(this, args);
+      throw new Error('Lost first-state reply');
+    });
     items = [tool, { type: 'text', text: 'base🙂🚀' }];
     try {
-      await expect(
-        fixture.backend.applyHistoryAction({
-          kind: 'assistant-items',
-          turnId: turn.id,
-          mode: 'replace',
-          items,
-        })
-      ).rejects.toThrow('Lost first-state reply');
-    } finally {
-      lost.mockRestore();
-    }
-    expect(await fixture.backend.readTurn(turn.id)).toMatchObject({
-      state: 'ready',
-      turn: { items },
-    });
+      await expect(fixture.backend.applyHistoryAction({ kind: 'assistant-items', turnId: turn.id,
+        mode: 'replace', items })).rejects.toThrow('Lost first-state reply');
+    } finally { lost.mockRestore(); }
+    expect(await fixture.backend.readTurn(turn.id)).toMatchObject({ state: 'ready', turn: { items } });
     for (let step = 1; step < 32; step++) {
       items = [tool, { type: 'text', text: `base🙂${'🚀'.repeat(step + 1)}` }];
-      await fixture.backend.applyHistoryAction({
-        kind: 'assistant-items',
-        turnId: turn.id,
-        mode: 'replace',
-        items,
-      });
+      await fixture.backend.applyHistoryAction({ kind: 'assistant-items', turnId: turn.id, mode: 'replace', items });
     }
     await fixture.backend.flushLocalWrites();
-    const after = updates();
+    const after = await updates();
     for (const row of after) {
       const old = before.get(row.key.toString('hex'));
       if (old) expect(row.value.equals(old)).toBe(true);
     }
-    expect(after.filter((row) => before.has(row.key.toString('hex'))).length).toBe(before.size);
-    const added = after.filter((row) => !before.has(row.key.toString('hex')));
+    expect(after.filter(row => before.has(row.key.toString('hex'))).length).toBe(before.size);
+    const added = after.filter(row => !before.has(row.key.toString('hex')));
+    expect(added.length).toBeGreaterThan(0);
     expect(added.reduce((sum, row) => sum + row.value.length, 0)).toBeLessThan(128 * 1024);
     for (const row of added) {
       expect(row.key.subarray(0, 16).equals(Buffer.from(primaryId))).toBe(false);
@@ -1528,8 +1498,7 @@ describe('Production Roost history semantics', () => {
     await fixture.close();
     const reopened = await nativeFixture(sessionId);
     expect(await reopened.backend.readTurn(turn.id)).toMatchObject({
-      state: 'ready',
-      turn: { items, finished: true, endedAt: 42 },
+      state: 'ready', turn: { items, finished: true, endedAt: 42 },
     });
     expect((await reopened.backend.readHistory()).length).toBe(1);
   });
@@ -2895,7 +2864,9 @@ describe('Production Roost history semantics', () => {
       let updateBytes = 0;
       for (const header of headers) {
         expect(header.nextSeq).toBeLessThan(4096n);
-        updateBytes += (await stream.exportUpdates(header.turnId, 0n, 4096n)).byteLength;
+        const exported = await stream.exportUpdates(header.turnId, 0n, 4096n);
+        expect(BigInt(decodeBatch(exported).length)).toBe(header.nextSeq);
+        updateBytes += exported.byteLength;
       }
       // Measure decoded/exported history: compression must not conceal repeated
       // full-body updates or dropped idempotency records behind fewer SQL rows.
@@ -3048,10 +3019,8 @@ describe('Production Roost compact agent receipts', () => {
                   value: Buffer.from(JSON.stringify({ version: 1, digest: 'cd'.repeat(32) })),
                 }
               : {
-                  table:
-                    kind === 'renderer-v1'
-                      ? 'lody_renderer_history_changes_v1'
-                      : 'lody_renderer_history_changes_v2',
+                  table: kind === 'renderer-v1'
+                    ? 'lody_renderer_history_changes_v1' : 'lody_renderer_history_changes_v2',
                   key: Buffer.alloc(8),
                   value: Buffer.from(
                     JSON.stringify({
@@ -3072,8 +3041,7 @@ describe('Production Roost compact agent receipts', () => {
           const scope = Buffer.alloc(32, 0xab);
           if (mixed && !current)
             await raw.annotateCommit(scope, 0n, {
-              before: 0n,
-              value: encodeRoostHistoryChange({ nonce: id, reset: false, ids: [] }),
+              before: 0n, value: encodeRoostHistoryChange({ nonce: id, reset: false, ids: [] }),
             });
           const metadataBefore = await raw.readCommitMetadata(scope, 0n);
           const generation = new RoostHistoryGeneration(client, owner, id);
@@ -3081,12 +3049,7 @@ describe('Production Roost compact agent receipts', () => {
           await expect(generation.resolve()).rejects.toThrow(error);
           await expect(generation.lookupOperation(identity)).rejects.toThrow(error);
           await expect(
-            generation.commitPatches(
-              [],
-              [agentReceiptPut(identity, 'ef'.repeat(32))],
-              undefined,
-              []
-            )
+            generation.commitPatches([], [agentReceiptPut(identity, 'ef'.repeat(32))], undefined, [])
           ).rejects.toThrow(error);
           await expect(
             generation.replace([nativeUser('must-not-write')], 'must-not-activate')
@@ -3163,8 +3126,7 @@ describe('Production Roost compact agent receipts', () => {
       turn: { items: [{ text: input.contents.map((item) => item.text).join('') }] },
     });
     expect(await fixture.backend.history.readChanges!(checkpoint)).toMatchObject({
-      state: 'ready',
-      ids: ['atomic-output'],
+      state: 'ready', ids: ['atomic-output'],
     });
     await fixture.backend.applyAgentBatch({
       ...input,
