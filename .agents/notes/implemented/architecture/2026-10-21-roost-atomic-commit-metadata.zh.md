@@ -77,3 +77,17 @@ Native `commit-metadata-v1` 使用 fresh/SQLite v8，无旧 reader、迁移或�
 主 `@loro-dev/roost-node@0.2.0` 尚不提供本 API；验证只在隔离 checkout 链接候选 JS/types
 和本机/Linux addon，未更改共享 pnpm store。草稿禁止合并，直到维护者统一发布 Roost，
 随后更新精确依赖和锁文件并用正式包复核。没有修改当前 CLI、staging、npm 包或已有测试库。
+
+## 压缩存储验证跟进（2026-10-22）
+
+Roost 拟议的 SQLite v9 将保留的 updates/events 装进压缩块。流式回归原来把 SQL 行数
+当成操作数量，并统计编码后的凭据 bytes，因此即使完整历史仍在，新物理布局也会让断言
+失败。现在改用 Native Turn 序列总数、导出的更新 bytes 和解码后的索引记录，保留原来的
+1 MiB 历史上限、128 条完整的 82-byte 凭据、不变大字段内容以及重开/重试检查。投影布局
+未变，仍检查物理记录数量。这次只改测试，同时适用于 v8/v9 候选，不添加运行时格式读取、
+依赖更新或迁移。上述发包和精确依赖更新仍是独立发布步骤。
+
+配套实现：[Roost #22](https://github.com/loro-dev/roost/pull/22)。四个 suite 在两版候选
+addon 上均为 106 项通过。CLI 类型、定向 lint 和格式检查通过；docs check 为
+0 errors / 71 既有 warnings。指定候选 addon 的 root check 被上述未改动的
+site-docs/fumadocs pretypecheck 错误阻塞，未记为通过。

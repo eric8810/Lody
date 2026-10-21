@@ -101,3 +101,22 @@ isolated checkouts; the shared pnpm store was not modified. The draft must not
 merge until maintainers publish the coordinated Roost release, update exact
 dependencies and the lockfile, and recheck against the published package. No
 running CLI, staging deployment, npm package or existing test database was changed.
+
+## Packed-storage validation follow-up (2026-10-22)
+
+Roost's proposed SQLite v9 groups retained updates/events into compressed blocks.
+The streaming regression previously equated SQL rows with operations and measured
+encoded receipt bytes, so that assertion fails for the new physical layout even
+when history is intact. The test now checks Native Turn sequence totals, exported
+update bytes and decoded index entries, retaining the same 1 MiB history bound,
+128 complete 82-byte receipts, unchanged-field content and reopen/retry checks.
+Projection record-count bounds remain physical because that layout is unchanged.
+This changes tests only, works with both the v8 candidate and v9 candidate, and
+adds no runtime format reader, dependency update or migration. Package publication
+and the exact dependency update required above remain separate release steps.
+
+Companion implementation: [Roost #22](https://github.com/loro-dev/roost/pull/22).
+The four suites pass all 106 cases with both candidate addons. CLI typechecking,
+scoped lint and formatting pass; docs check has 0 errors / 71 existing warnings.
+Root check with the candidate addon is blocked by the unchanged site-docs/fumadocs
+pretypecheck error described above; it is not reported as passing.
