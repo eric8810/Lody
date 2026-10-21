@@ -2,6 +2,8 @@
 
 Status: implemented
 Translation: current
+PR: https://github.com/LodyAI/Lody/pull/1791
+Companion: https://github.com/loro-dev/roost/pull/21
 
 [中文](2026-10-21-roost-atomic-commit-metadata.zh.md)
 
@@ -43,9 +45,7 @@ help this storage contract. The codec remains pure TypeScript.
 
 ## Validation
 
-The four real-Native owning suites (roost-history-local-writes,
-roost-session-backend-contract, roost-history-port and roost-content-patches)
-passed all 106 tests. They cover lost-reply retry/reopen change reads, conflicting
+The four real-Native owning suites passed all 106 tests. They cover lost-reply retry/reopen change reads, conflicting
 digests, receipt-only CAS, batches crossing 128 native-event pages, unannotated
 gaps, generations/nonces, corruption and unchanged refusal of old/mixed formats.
 Rust passed 365 tests with 6 existing ignored; Native passed 53 tests. The packed

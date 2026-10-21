@@ -2,6 +2,8 @@
 
 Status: implemented
 Translation: current
+PR: https://github.com/LodyAI/Lody/pull/1791
+Companion: https://github.com/loro-dev/roost/pull/21
 
 [English](2026-10-21-roost-atomic-commit-metadata.md)
 
@@ -33,8 +35,7 @@ Session 依赖，不能帮助本次存储合同。codec 保持纯 TypeScript。
 
 ## 验证与发布
 
-真实 Native 的四个 owning suites（roost-history-local-writes、roost-session-backend-contract、
-roost-history-port、roost-content-patches）共 106 项通过。包括丢回复后的重试及重开增量读取、
+真实 Native 的四个 owning suites 共 106 项通过。包括丢回复后的重试及重开增量读取、
 同 ID 不同摘要拒绝、只写凭据的 CAS、跨 128 原生事件页的批次、未附摘要的缺口、generation
 与 nonce、损坏数据、旧/混合格式原样拒绝。Rust 365 项通过、6 项原有 ignored；Native 53 项
 通过。打包后的 SQLite v8 重开与加密同步 smoke 通过。pending 远端工作与本地写入合并时，
