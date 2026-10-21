@@ -13,7 +13,7 @@ import {
 import type { RoostNativeClient, RoostNodeStream, Write, IndexPut } from '@loro-dev/roost-node';
 import type { SessionHistoryInput } from '@lody/shared';
 import { encodeRoostContent } from './roost-history-port';
-import { AGENT_RECEIPTS_TABLE, agentReceiptKey } from './roost-content-patches';
+import { AGENT_RECEIPTS_TABLE, agentReceiptKey, decodeAgentReceipt } from './roost-content-patches';
 
 const nextKey = { table: 'lody_history_generation_v1', key: new TextEncoder().encode('next') };
 const epochKey = { table: 'lody_history_epoch_v1', key: new TextEncoder().encode('current') };
@@ -36,6 +36,7 @@ export class RoostHistoryGeneration {
   private streamId: string;
   private raw: RoostNodeStream;
   private readonly ancestors: NodeLodyHistory[] = [];
+  private readonly checkedReceiptFormats = new WeakSet<RoostNodeStream>();
   private resolveSerial: Promise<void> = Promise.resolve();
   private epoch: Uint8Array | null = null;
   private retireBinding: (() => void) | undefined;
@@ -67,6 +68,16 @@ export class RoostHistoryGeneration {
 
   commitPatches(writes: Write[], receipts: IndexPut[], cursor: bigint | undefined) {
     return this.host.writeBatch(writes, { indexPuts: receipts, expectedEventCursor: cursor });
+  }
+
+  private async assertReceiptFormat(raw: RoostNodeStream): Promise<void> {
+    if (this.checkedReceiptFormats.has(raw)) return;
+    // Presence check only: experimental v1 sessions are rejected, never migrated
+    // or looked up as missing v2 receipts. Cache only for this stream handle's lifetime.
+    const previous = await raw.scanIndex('lody_agent_operation_receipts_v1', new Uint8Array(), 1n);
+    if (previous.length)
+      throw new Error('Unsupported Roost agent receipt format; create a new test session');
+    this.checkedReceiptFormats.add(raw);
   }
 
   /** A derived cache may advance only across writes whose receipts we own. */
@@ -133,6 +144,7 @@ export class RoostHistoryGeneration {
     };
     let boundEpoch = this.epoch?.slice() ?? null;
     const checkCurrent = async () => {
+      await this.assertReceiptFormat(raw);
       const [next, epoch] = await raw.readIndex([nextKey, epochKey]);
       if (retired || next !== null || !sameEpoch(boundEpoch, epoch ?? null)) throw stale();
     };
@@ -189,6 +201,7 @@ export class RoostHistoryGeneration {
       get(target, property) {
         if (property === 'compareAndWriteIndex')
           return async (...args: Parameters<RoostNodeStream['compareAndWriteIndex']>) => {
+            await generation.assertReceiptFormat(raw);
             const committed = await raw.compareAndWriteIndex(...args);
             const evidence = generation.writeEvidence;
             if (committed && evidence?.raw === raw) {
@@ -307,6 +320,7 @@ export class RoostHistoryGeneration {
     for (;;) {
       if (seen.has(this.streamId)) throw new Error('Roost history generation cycle');
       seen.add(this.streamId);
+      await this.assertReceiptFormat(this.raw);
       const [turnId, epoch] = await this.raw.readIndex([nextKey, epochKey]);
       if (turnId === null || turnId === undefined) {
         if (!sameEpoch(this.epoch, epoch ?? null)) {
@@ -344,6 +358,7 @@ export class RoostHistoryGeneration {
       this.ancestors.push(this.history);
       this.streamId = value.next;
       this.raw = this.client.stream(this.streamId);
+      await this.assertReceiptFormat(this.raw);
       const [nextEpoch] = await this.raw.readIndex([epochKey]);
       await this.readEpoch(this.raw, nextEpoch ?? null);
       this.epoch = nextEpoch?.slice() ?? null;
@@ -356,16 +371,12 @@ export class RoostHistoryGeneration {
 
   async lookupOperation(identity: HistoryIdentity) {
     for (const history of [this.history, ...[...this.ancestors].reverse()]) {
+      await this.assertReceiptFormat(history.stream as RoostNodeStream);
       if (identity.kind === 'publication') {
         const [receipt] = await history.stream.readIndex([
           { table: AGENT_RECEIPTS_TABLE, key: agentReceiptKey(identity) },
         ]);
-        if (receipt) {
-          const value = JSON.parse(new TextDecoder().decode(receipt));
-          if (value?.version !== 1 || typeof value.digest !== 'string')
-            throw new Error('Roost agent operation receipt is invalid');
-          return { digest: value.digest };
-        }
+        if (receipt) return decodeAgentReceipt(receipt);
       }
       const found = await history.lookup(identity);
       if (found?.kind === 'found') {
@@ -396,6 +407,7 @@ export class RoostHistoryGeneration {
     } = {}
   ): Promise<void> {
     const previous = this.raw;
+    await this.assertReceiptFormat(previous);
     const previousId = this.streamId;
     const cursor = expectedCursor ?? (await this.history.observedEventCursor());
     if ((await previous.readIndex([nextKey]))[0] !== null) throw stale();

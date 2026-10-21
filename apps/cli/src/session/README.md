@@ -593,11 +593,18 @@ records the format, release dependency and measured storage reduction. Permissio
 remain independent SDK records projected onto the matching tool. Responding does
 not seal the assistant or interrupt its output.
 Existing eligible unsealed primary/state records use guarded native field/text edits,
-with compact publication digests in `lody_agent_operation_receipts_v1`, committed in
-the same `writeBatch`. This owner-local journal has no command/body/baseline snapshots;
-lookup retains previous SDK receipts and generation ancestors. Creation, stitched or
+with compact publication digests in `lody_agent_operation_receipts_v2`, committed in
+the same `writeBatch`. Canonical UUID agent identities use 49 key bytes and 33 value
+bytes, retaining the full operation and content digests; other identities use a
+disjoint canonical JSON key tag. This experimental format has no v1 reader or
+migration: a bounded presence check rejects generations containing v1 receipts
+before recovery or writes. Start a new session; existing data is not deleted.
+This owner-local journal has no command/body/baseline snapshots; lookup retains
+SDK receipts from structural writes and generation ancestors. Creation, stitched or
 sealed targets, permissions, immutable human input and branch contracts retain their
 SDK path. A failed native write never falls through to a second write path.
+The [receipt encoding change](../../../../.agents/notes/implemented/bug-fix/2026-10-21-roost-agent-receipt-encoding.md)
+records the format break and whole-session validation.
 Native inserted items/fields use the same JSON encoding as SDK content: absent object
 fields are omitted and absent array values become `null`. Normalize only changed
 subtrees; unchanged message bodies are not serialized for each delta. The semantic

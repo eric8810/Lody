@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { LoroRepo } from 'loro-repo';
 import { LoroDoc } from 'loro-crdt';
 import { Cause, Effect, Exit, Fiber } from 'effect';
@@ -33,7 +34,7 @@ import {
   routeRemoteOwnedSessionHistory,
   type SessionBackendFactory,
 } from '../src/session/session-backend';
-import { NodeLodyHistory } from '@loro-dev/roost/lody-history';
+import { NodeLodyHistory, type HistoryIdentity } from '@loro-dev/roost/lody-history';
 import {
   CURRENT_MACHINE_PROTOCOL_CAPABILITIES,
   SessionHistoryReadResponseSchema,
@@ -68,6 +69,12 @@ import { Identity } from '@loro-dev/roost';
 import { RoostNativeClient, RoostHostError } from '@loro-dev/roost-node';
 import { describeRoostHistoryFailure } from '../src/session/roost-history-diagnostics';
 import { RoostHistoryGeneration } from '../src/session/roost-history-generation';
+import {
+  AGENT_RECEIPTS_TABLE,
+  agentReceiptKey,
+  agentReceiptPut,
+  decodeAgentReceipt,
+} from '../src/session/roost-content-patches';
 import { findNextDispatchableUserTurn } from '../src/session/session-dispatch-logic';
 import type { SessionMeta } from '@lody/shared';
 import { encodeRoostContent } from '../src/session/roost-history-port';
@@ -2773,7 +2780,7 @@ describe('Production Roost history semantics', () => {
   });
 
   it('keeps sustained streaming writes bounded with a large unchanged field and survives reopen', async () => {
-    const fixture = await nativeFixture();
+    const fixture = await nativeFixture(randomUUID());
     const untouched = 'unchanged'.repeat(4096);
     await fixture.backend.appendHistoryTurn({
       ...nativeAssistant('bounded-stream'),
@@ -2830,9 +2837,10 @@ describe('Production Roost history semantics', () => {
       expect(stats.rows).toBeGreaterThan(128);
       expect(stats.bytes).toBeLessThan(1024 * 1024);
       const receipts = db
-        .prepare(`SELECT COUNT(*) AS count FROM ${kvRows} WHERE space LIKE ?`)
-        .get(`%${fixture.doc.sessionId}%:lody_agent_operation_receipts_v1`) as { count: number };
-      expect(receipts.count).toBe(128);
+        .prepare(`SELECT COUNT(*) AS count, SUM(LENGTH(key) + LENGTH(value)) AS bytes
+          FROM ${kvRows} WHERE space LIKE ?`)
+        .get(`%${fixture.doc.sessionId}%:${AGENT_RECEIPTS_TABLE}`);
+      expect(receipts).toEqual({ count: 128, bytes: 128 * 82 });
       const projection = db
         .prepare(`SELECT COUNT(*) AS count FROM ${kvRows} WHERE space LIKE ?`)
         .get(`%${fixture.doc.sessionId}%:projection`) as { count: number };
@@ -2858,6 +2866,238 @@ describe('Production Roost history semantics', () => {
         ],
       },
     });
+  });
+});
+
+describe('Production Roost compact agent receipts', () => {
+  it('preserves exact identity and digest bytes, rejecting malformed receipts instead of falling through', async () => {
+    const seed = new Uint8Array(32).fill(47);
+    const owner = Identity.fromSeed(seed).owner();
+    const client = new RoostNativeClient({
+      dbPath: join(nativeDirectory, 'receipt-encoding.db'),
+      seed,
+      allowedOwners: [owner],
+      maxQueuedRequests: 32,
+      maxQueuedBytes: 8 * 1024 * 1024,
+    });
+    try {
+      await client.ready;
+      const generation = new RoostHistoryGeneration(client, owner, 'receipt-encoding');
+      const identity: HistoryIdentity = {
+        kind: 'publication',
+        businessId: 'abcdef01-2345-6789-abcd-ef0123456789',
+        segmentId: `agent:${'ab'.repeat(32)}`,
+      };
+      const identities = [
+        identity,
+        { ...identity, businessId: identity.businessId.toUpperCase() },
+        { ...identity, businessId: `${identity.businessId}\n` },
+        { ...identity, segmentId: `${identity.segmentId}\n` },
+        { ...identity, segmentId: identity.segmentId.toUpperCase() },
+        ...['non-uuid', '🙂', 'a\u0000b'].map((businessId) => ({
+          ...identity,
+          businessId,
+        })),
+        { ...identity, businessId: identity.businessId.replace('abcdef01', 'abcdef02') },
+        { ...identity, segmentId: `agent:${'ab'.repeat(31)}ac` },
+      ];
+      const receipts = identities.map((id, index) =>
+        agentReceiptPut(id, index.toString(16).padStart(64, '0'))
+      );
+      await generation.commitPatches([], receipts, undefined);
+      for (const [index, id] of identities.entries())
+        expect(await generation.lookupOperation(id)).toEqual({
+          digest: index.toString(16).padStart(64, '0'),
+        });
+      expect(await generation.lookupOperation({ ...identity, kind: 'message' })).toBeUndefined();
+      for (const businessId of ['\ud800', '\ud801'])
+        expect(() => agentReceiptKey({ ...identity, businessId })).toThrow('unpaired surrogate');
+      // Identity property order has never been significant in the canonical contract.
+      expect(
+        agentReceiptKey({
+          segmentId: identity.segmentId,
+          kind: identity.kind,
+          businessId: identity.businessId,
+        })
+      ).toEqual(agentReceiptKey(identity));
+      for (const digest of [
+        '',
+        'ab'.repeat(31),
+        'AB'.repeat(32),
+        `${'ab'.repeat(32)}\n`,
+        'gg'.repeat(32),
+      ])
+        expect(() => agentReceiptPut(identity, digest)).toThrow('digest is invalid');
+      const valid = agentReceiptPut(identity, 'ff'.repeat(32));
+      expect(decodeAgentReceipt(valid.value)).toEqual({ digest: 'ff'.repeat(32) });
+      for (const value of [
+        new Uint8Array(),
+        valid.value.slice(1),
+        Buffer.concat([valid.value, Buffer.from([0])]),
+        Buffer.concat([Buffer.from([1]), valid.value.slice(1)]),
+        Buffer.from('{"version":1,"digest":"old"}'),
+      ]) {
+        await generation.host.writeBatch([], { indexPuts: [{ ...valid, value }] });
+        await expect(generation.lookupOperation(identity)).rejects.toThrow('receipt is invalid');
+      }
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('rejects old and mixed receipt formats before opening or mutating a session, without deleting data', async () => {
+    const dbPath = join(nativeDirectory, 'history.db');
+    const seed = await loadRoostOwnerSeedLegacy(dbPath);
+    const owner = Identity.fromSeed(seed).owner();
+    const client = new RoostNativeClient({
+      dbPath,
+      seed,
+      allowedOwners: [owner],
+      maxQueuedRequests: 32,
+      maxQueuedBytes: 8 * 1024 * 1024,
+    });
+    try {
+      await client.ready;
+      for (const mixed of [false, true]) {
+        const id = randomUUID();
+        const raw = client.stream(`lody-session:${id}`);
+        const identity: HistoryIdentity = {
+          kind: 'publication',
+          businessId: id,
+          segmentId: `agent:${'ab'.repeat(32)}`,
+        };
+        const previous = {
+          table: 'lody_agent_operation_receipts_v1',
+          key: Buffer.from(JSON.stringify(identity)),
+          value: Buffer.from(JSON.stringify({ version: 1, digest: 'cd'.repeat(32) })),
+        };
+        await raw.writeBatch([], {
+          indexPuts: [previous, ...(mixed ? [agentReceiptPut(identity, 'cd'.repeat(32))] : [])],
+        });
+        const generation = new RoostHistoryGeneration(client, owner, id);
+        await expect(generation.resolve()).rejects.toThrow(
+          'Unsupported Roost agent receipt format'
+        );
+        await expect(generation.lookupOperation(identity)).rejects.toThrow(
+          'Unsupported Roost agent receipt format'
+        );
+        await expect(
+          generation.commitPatches([], [agentReceiptPut(identity, 'ef'.repeat(32))], undefined)
+        ).rejects.toThrow('Unsupported Roost agent receipt format');
+        await expect(
+          generation.replace([nativeUser('must-not-write')], 'must-not-activate')
+        ).rejects.toThrow('Unsupported Roost agent receipt format');
+        await expect(nativeFixture(id)).rejects.toThrow('Unsupported Roost agent receipt format');
+        expect(await raw.readIndex([previous])).toEqual([new Uint8Array(previous.value)]);
+        expect(
+          await raw.readIndex([{ table: AGENT_RECEIPTS_TABLE, key: agentReceiptKey(identity) }])
+        ).toEqual([
+          mixed ? new Uint8Array(agentReceiptPut(identity, 'cd'.repeat(32)).value) : null,
+        ]);
+        expect(await raw.scanIndex('lody_history_generation_v1', new Uint8Array(), 1n)).toEqual([]);
+      }
+      const fresh = await nativeFixture();
+      await fresh.backend.appendHistoryTurn(nativeUser('independent'));
+      expect(await fresh.backend.readHistory()).toMatchObject([{ id: 'independent' }]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('rolls back output and receipts together, then recovers a partially committed multi-chunk retry after reopen', async () => {
+    let fixture = await nativeFixture(randomUUID());
+    await fixture.backend.appendHistoryTurn({
+      ...nativeAssistant('atomic-output'),
+      items: [{ type: 'text', text: '' }],
+    });
+    const original = RoostHistoryGeneration.prototype.commitPatches;
+    const input = {
+      targetAssistantEntryId: 'atomic-output',
+      contents: Array.from({ length: 65 }, (_, i) => ({ type: 'text' as const, text: `🙂${i};` })),
+      operationIds: Array.from({ length: 65 }, (_, i) => `atomic-${i}`),
+    };
+    const rollback = vi
+      .spyOn(RoostHistoryGeneration.prototype, 'commitPatches')
+      .mockImplementation(function (writes, receipts, cursor) {
+        const edit = writes.find((write) => write.kind === 'edit');
+        if (!edit) throw new Error('Expected native content edit');
+        return original.call(
+          this,
+          [...writes, { ...edit, expectedNextSeq: edit.expectedNextSeq + 100n }],
+          receipts,
+          cursor
+        );
+      });
+    await expect(fixture.backend.applyAgentBatch(input)).rejects.toThrow();
+    rollback.mockRestore();
+    expect(await fixture.backend.readTurn('atomic-output')).toMatchObject({
+      state: 'ready',
+      turn: { items: [{ text: '' }] },
+    });
+    const lostReply = vi
+      .spyOn(RoostHistoryGeneration.prototype, 'commitPatches')
+      .mockImplementationOnce(async function (...args) {
+        await original.apply(this, args);
+        throw new Error('Injected lost chunk reply');
+      });
+    await expect(fixture.backend.applyAgentBatch(input)).rejects.toThrow(
+      'Injected lost chunk reply'
+    );
+    lostReply.mockRestore();
+    const id = fixture.doc.sessionId;
+    await fixture.close();
+    fixture = await nativeFixture(id);
+    await fixture.backend.applyAgentBatch(input);
+    const before = await fixture.backend.readTurn('atomic-output');
+    expect(before).toMatchObject({
+      state: 'ready',
+      turn: { items: [{ text: input.contents.map((item) => item.text).join('') }] },
+    });
+    await fixture.backend.applyAgentBatch({
+      ...input,
+      contents: input.contents.slice(25),
+      operationIds: input.operationIds.slice(25),
+    });
+    expect(await fixture.backend.readTurn('atomic-output')).toEqual(before);
+    await expect(
+      fixture.backend.applyAgentBatch({
+        ...input,
+        contents: [{ type: 'text', text: 'conflict' }],
+        operationIds: ['atomic-29'],
+      })
+    ).rejects.toThrow('identity conflict');
+  });
+
+  it('retains agent receipts across branch removal, generation replacement and reopen without reviving removed output', async () => {
+    let fixture = await nativeFixture(randomUUID());
+    await fixture.backend.appendHistoryTurn(nativeUser('branch-user'));
+    await fixture.backend.appendHistoryTurn(nativeAssistant('branch-assistant'));
+    const input = {
+      targetAssistantEntryId: 'branch-assistant',
+      contents: [{ type: 'text' as const, text: 'once' }],
+      operationIds: ['branch-output'],
+    };
+    await fixture.backend.applyAgentBatch(input);
+    expect(
+      await fixture.backend.replaceEditableTail({
+        expectedUserTurnId: 'branch-user',
+        expectedForkTurnId: undefined,
+        replacement: nativeUser('replacement-user') as never,
+      })
+    ).toMatchObject({ status: 'accepted' });
+    await fixture.backend.applyAgentBatch(input);
+    expect((await fixture.backend.readHistory()).map((turn) => turn.id)).toEqual([
+      'replacement-user',
+    ]);
+    await fixture.backend.applyHistoryAction({ kind: 'remove-turn', turnId: 'replacement-user' });
+    const id = fixture.doc.sessionId;
+    await fixture.close();
+    fixture = await nativeFixture(id);
+    await fixture.backend.applyAgentBatch(input);
+    expect(await fixture.backend.readHistory()).toEqual([]);
+    await expect(
+      fixture.backend.applyAgentBatch({ ...input, contents: [{ type: 'text', text: 'conflict' }] })
+    ).rejects.toThrow('identity conflict');
   });
 });
 

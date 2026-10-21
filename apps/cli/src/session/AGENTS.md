@@ -71,7 +71,7 @@
 
 - [Roost](README.md#roost-history-paging): check owner/backend; no keyring,
   rotation/fallback, removed-history revival, uncertain steer replay or signed-log/receipt pruning.
-  Commit guarded edits+digests atomically; no SDK retry after uncertainty.
+  Commit guarded edits+digests atomically; v2 receipts only; no SDK retry after uncertainty.
   Keep input/permission/branch recovery SDK-owned. Local causes; RPC stage/code/ID.
 - `Session.createAgent` gates each ACP spawn; failed spawns reject JSON-RPC. Terminals use protocol argv (`sh -c` for unsplit commands only). Managed Codex reused-refresh startup
   retries once after process cleanup, delay, and live Provider recheck; other auth errors do not.

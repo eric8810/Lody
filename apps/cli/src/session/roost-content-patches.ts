@@ -2,14 +2,44 @@ import { applicationJsonText, type HistoryIdentity } from '@loro-dev/roost/lody-
 import type { ContentOp, IndexPut } from '@loro-dev/roost-node';
 import { encodeRoostContentText } from './roost-history-port';
 
-export const AGENT_RECEIPTS_TABLE = 'lody_agent_operation_receipts_v1';
-export const agentReceiptKey = (identity: HistoryIdentity) =>
-  new TextEncoder().encode(applicationJsonText(identity));
-export const agentReceiptPut = (identity: HistoryIdentity, digest: string): IndexPut => ({
-  table: AGENT_RECEIPTS_TABLE,
-  key: agentReceiptKey(identity),
-  value: new TextEncoder().encode(JSON.stringify({ version: 1, digest })),
-});
+export const AGENT_RECEIPTS_TABLE = 'lody_agent_operation_receipts_v2';
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const agentSegment = /^agent:[0-9a-f]{64}$/;
+const digestHex = /^[0-9a-f]{64}$/;
+
+export function agentReceiptKey(identity: HistoryIdentity): Uint8Array {
+  if (
+    identity.kind === 'publication' &&
+    Object.keys(identity).length === 3 &&
+    identity.businessId.length === 36 &&
+    identity.segmentId.length === 70 &&
+    uuid.test(identity.businessId) &&
+    agentSegment.test(identity.segmentId)
+  ) {
+    // Tag + complete UUID + complete operation digest. Do not normalize identity strings.
+    const key = Buffer.alloc(49);
+    key.write(identity.businessId.replaceAll('-', ''), 1, 16, 'hex');
+    key.write(identity.segmentId.slice(6), 17, 32, 'hex');
+    return key;
+  }
+  // A disjoint tag preserves all other identities, including non-UUID session IDs.
+  return Buffer.concat([Buffer.from([1]), Buffer.from(applicationJsonText(identity))]);
+}
+
+export function agentReceiptPut(identity: HistoryIdentity, digest: string): IndexPut {
+  if (digest.length !== 64 || !digestHex.test(digest))
+    throw new Error('Roost agent operation digest is invalid');
+  const value = Buffer.alloc(33);
+  value[0] = 2;
+  value.write(digest, 1, 32, 'hex');
+  return { table: AGENT_RECEIPTS_TABLE, key: agentReceiptKey(identity), value };
+}
+
+export function decodeAgentReceipt(value: Uint8Array): { digest: string } {
+  if (value.length !== 33 || value[0] !== 2)
+    throw new Error('Roost agent operation receipt is invalid');
+  return { digest: Buffer.from(value.subarray(1)).toString('hex') };
+}
 
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
