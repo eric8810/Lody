@@ -94,3 +94,8 @@ Roost 拟议的 SQLite v9 将保留的 updates/events 装进压缩块。流式�
 addon 上均为 106 项通过。CLI 类型、定向 lint 和格式检查通过；docs check 为
 0 errors / 71 既有 warnings。指定候选 addon 的 root check 被上述未改动的
 site-docs/fumadocs pretypecheck 错误阻塞，未记为通过。
+[PR #1800 静态 CI](https://github.com/LodyAI/Lody/actions/runs/39695502246/job/119551749710)
+另确认了发包门槛：当前锁定的正式包缺少父 PR 使用的 `readCommitMetadata`、
+`annotateCommit`、`commitMetadataAfter`、`expectedIndexes` 和 `commit-metadata-v1`。
+这些生产源码本次未改。合并前须统一发布 Native、更新父 PR 的精确依赖和锁文件；
+候选链接测试通过不代表使用正式注册表包的 CI 已通过。

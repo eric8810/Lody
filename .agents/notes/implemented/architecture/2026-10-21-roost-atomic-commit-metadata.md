@@ -126,3 +126,10 @@ The four suites pass all 106 cases with both candidate addons. CLI typechecking,
 scoped lint and formatting pass; docs check has 0 errors / 71 existing warnings.
 Root check with the candidate addon is blocked by the unchanged site-docs/fumadocs
 pretypecheck error described above; it is not reported as passing.
+[PR #1800 static CI](https://github.com/LodyAI/Lody/actions/runs/39695502246/job/119551749710)
+confirms the separate release gate: the pinned published package lacks
+`readCommitMetadata`, `annotateCommit`, `commitMetadataAfter`, `expectedIndexes`
+and `commit-metadata-v1` used by the parent PR. Those source files are unchanged
+here. Publish the coordinated Native package and update the parent's exact
+dependency/lockfile before merging; candidate-linked tests do not make registry
+CI green.
