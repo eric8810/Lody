@@ -3,32 +3,24 @@ import { z } from 'zod';
 import type { SessionHistoryChanges } from '@lody/shared';
 import type { RoostHistoryChange } from '@lody/shared/session-data';
 import type { RoostNodeStream } from '@loro-dev/roost-node';
+import {
+  encodeRoostHistoryChange as encode,
+  decodeRoostHistoryChange as decode,
+  type RoostHistoryChangeReceipt as Receipt,
+} from './roost-history-change-codec';
 
-const TABLE = 'lody_renderer_history_changes_v1';
+export const RENDERER_HISTORY_CHANGES_TABLE = 'lody_renderer_history_changes_v2';
+const TABLE = RENDERER_HISTORY_CHANGES_TABLE;
 const cursorSchema = z
   .string()
   .regex(/^\d+$/)
   .refine((value) => BigInt(value) <= 0xffffffffffffffffn);
-const receiptSchema = z.object({
-  version: z.literal(1),
-  scope: z.string(),
-  nonce: z.string(),
-  before: cursorSchema,
-  through: cursorSchema,
-  reset: z.boolean(),
-  from: z.number().int().nonnegative().optional(),
-  ids: z.array(z.string()),
-});
 const checkpointSchema = z.tuple([z.string(), cursorSchema, z.string()]);
-type Receipt = z.infer<typeof receiptSchema>;
 const key = (cursor: bigint) => {
   const bytes = Buffer.alloc(8);
   bytes.writeBigUInt64BE(cursor);
   return bytes;
 };
-const encode = (receipt: Receipt) => new TextEncoder().encode(JSON.stringify(receipt));
-const decode = (value: Uint8Array) =>
-  receiptSchema.parse(JSON.parse(new TextDecoder().decode(value)));
 const token = (receipt: Receipt) => JSON.stringify([receipt.scope, receipt.through, receipt.nonce]);
 
 /** Only use after read() has verified this checkpoint's complete receipt chain. */
@@ -43,7 +35,6 @@ export function createRoostHistoryChanges(host: () => RoostNodeStream, scope: ()
     const [stored] = await stream.readIndex([entry]);
     if (stored) return decode(stored);
     const receipt: Receipt = {
-      version: 1,
       scope: scope(),
       nonce: randomUUID(),
       before: cursor.toString(),
@@ -71,7 +62,6 @@ export function createRoostHistoryChanges(host: () => RoostNodeStream, scope: ()
     ) => {
       if (through === before) return;
       const receipt: Receipt = {
-        version: 1,
         scope: scope(),
         nonce: randomUUID(),
         before: before.toString(),

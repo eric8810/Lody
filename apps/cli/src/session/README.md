@@ -43,6 +43,8 @@ A notification failure cannot replay Agent execution.
   atomically activates them, fencing writes through superseded handles.
 - `roost-history-changes.ts` — durable semantic receipts over verified native event intervals;
   owner-scoped checkpoints recover missed logical edits without rereading unchanged bodies.
+- `roost-history-change-codec.ts` — lossless v2 storage for those receipts, retaining complete
+  identities, cursor intervals and structural/reset evidence.
 - `roost-history-diagnostics.ts` — correlates local Worker causes and runtime details
   with the safe error reference returned by history RPC.
 - `session-history-owner.ts` — native Effect readiness barrier for history RPC; waits
@@ -420,6 +422,13 @@ semantic change receipts after verifying the corresponding raw event interval. R
 contain no history body, signing material or executable command, and emit no outgoing event.
 A crash or foreign mutation that leaves an uncovered interval requires reset. A checkpoint
 cannot claim acceptance or execution, and must not be copied between unrelated owner views.
+
+Local receipts use `lody_renderer_history_changes_v2`: full binary scope/nonce/cursors and
+compact UUID lists, with exact JSON encoding for other IDs. Every interval remains stored;
+checkpoint tokens and RPC replies are unchanged. The owner refuses generations containing
+v1 renderer receipts before recovery or mutation, without migration or deletion. Start a new
+test session after retiring the old CLI owner; simultaneous old/new owners are unsupported.
+See the [encoding decision](../../../../.agents/notes/implemented/bug-fix/2026-10-21-roost-renderer-receipt-encoding.md).
 
 Normal repairs request affected bodies with the change interval in one reply, bounded at
 500 changed/suffix bodies. Larger repairs use checkpoint-protected ranges. The renderer

@@ -77,6 +77,9 @@ export class RoostHistoryGeneration {
     const previous = await raw.scanIndex('lody_agent_operation_receipts_v1', new Uint8Array(), 1n);
     if (previous.length)
       throw new Error('Unsupported Roost agent receipt format; create a new test session');
+    const renderer = await raw.scanIndex('lody_renderer_history_changes_v1', new Uint8Array(), 1n);
+    if (renderer.length)
+      throw new Error('Unsupported Roost renderer receipt format; create a new test session');
     this.checkedReceiptFormats.add(raw);
   }
 

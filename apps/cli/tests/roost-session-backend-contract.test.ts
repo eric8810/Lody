@@ -70,6 +70,10 @@ import { RoostNativeClient, RoostHostError } from '@loro-dev/roost-node';
 import { describeRoostHistoryFailure } from '../src/session/roost-history-diagnostics';
 import { RoostHistoryGeneration } from '../src/session/roost-history-generation';
 import {
+  RENDERER_HISTORY_CHANGES_TABLE,
+} from '../src/session/roost-history-changes';
+import { encodeRoostHistoryChange } from '../src/session/roost-history-change-codec';
+import {
   AGENT_RECEIPTS_TABLE,
   agentReceiptKey,
   agentReceiptPut,
@@ -2938,64 +2942,96 @@ describe('Production Roost compact agent receipts', () => {
     }
   });
 
-  it('rejects old and mixed receipt formats before opening or mutating a session, without deleting data', async () => {
-    const dbPath = join(nativeDirectory, 'history.db');
-    const seed = await loadRoostOwnerSeedLegacy(dbPath);
-    const owner = Identity.fromSeed(seed).owner();
-    const client = new RoostNativeClient({
-      dbPath,
-      seed,
-      allowedOwners: [owner],
-      maxQueuedRequests: 32,
-      maxQueuedBytes: 8 * 1024 * 1024,
-    });
-    try {
-      await client.ready;
-      for (const mixed of [false, true]) {
-        const id = randomUUID();
-        const raw = client.stream(`lody-session:${id}`);
-        const identity: HistoryIdentity = {
-          kind: 'publication',
-          businessId: id,
-          segmentId: `agent:${'ab'.repeat(32)}`,
-        };
-        const previous = {
-          table: 'lody_agent_operation_receipts_v1',
-          key: Buffer.from(JSON.stringify(identity)),
-          value: Buffer.from(JSON.stringify({ version: 1, digest: 'cd'.repeat(32) })),
-        };
-        await raw.writeBatch([], {
-          indexPuts: [previous, ...(mixed ? [agentReceiptPut(identity, 'cd'.repeat(32))] : [])],
-        });
-        const generation = new RoostHistoryGeneration(client, owner, id);
-        await expect(generation.resolve()).rejects.toThrow(
-          'Unsupported Roost agent receipt format'
-        );
-        await expect(generation.lookupOperation(identity)).rejects.toThrow(
-          'Unsupported Roost agent receipt format'
-        );
-        await expect(
-          generation.commitPatches([], [agentReceiptPut(identity, 'ef'.repeat(32))], undefined)
-        ).rejects.toThrow('Unsupported Roost agent receipt format');
-        await expect(
-          generation.replace([nativeUser('must-not-write')], 'must-not-activate')
-        ).rejects.toThrow('Unsupported Roost agent receipt format');
-        await expect(nativeFixture(id)).rejects.toThrow('Unsupported Roost agent receipt format');
-        expect(await raw.readIndex([previous])).toEqual([new Uint8Array(previous.value)]);
-        expect(
-          await raw.readIndex([{ table: AGENT_RECEIPTS_TABLE, key: agentReceiptKey(identity) }])
-        ).toEqual([
-          mixed ? new Uint8Array(agentReceiptPut(identity, 'cd'.repeat(32)).value) : null,
-        ]);
-        expect(await raw.scanIndex('lody_history_generation_v1', new Uint8Array(), 1n)).toEqual([]);
+  it.each(['agent', 'renderer'] as const)(
+    'rejects old and mixed %s receipt formats before opening or mutating a session, without deleting data',
+    async (kind) => {
+      const dbPath = join(nativeDirectory, 'history.db');
+      const seed = await loadRoostOwnerSeedLegacy(dbPath);
+      const owner = Identity.fromSeed(seed).owner();
+      const client = new RoostNativeClient({
+        dbPath,
+        seed,
+        allowedOwners: [owner],
+        maxQueuedRequests: 32,
+        maxQueuedBytes: 8 * 1024 * 1024,
+      });
+      try {
+        await client.ready;
+        for (const mixed of [false, true]) {
+          const id = randomUUID();
+          const raw = client.stream(`lody-session:${id}`);
+          const identity: HistoryIdentity = {
+            kind: 'publication',
+            businessId: id,
+            segmentId: `agent:${'ab'.repeat(32)}`,
+          };
+          const previous =
+            kind === 'agent'
+              ? {
+                  table: 'lody_agent_operation_receipts_v1',
+                  key: Buffer.from(JSON.stringify(identity)),
+                  value: Buffer.from(JSON.stringify({ version: 1, digest: 'cd'.repeat(32) })),
+                }
+              : {
+                  table: 'lody_renderer_history_changes_v1',
+                  key: Buffer.alloc(8),
+                  value: Buffer.from(
+                    JSON.stringify({
+                      version: 1,
+                      scope: 'ab'.repeat(32),
+                      nonce: id,
+                      before: '0',
+                      through: '0',
+                      reset: false,
+                      ids: [],
+                    })
+                  ),
+                };
+          const current =
+            kind === 'agent'
+              ? agentReceiptPut(identity, 'cd'.repeat(32))
+              : {
+                  table: RENDERER_HISTORY_CHANGES_TABLE,
+                  key: Buffer.alloc(8),
+                  value: encodeRoostHistoryChange({
+                    scope: 'ab'.repeat(32),
+                    nonce: id,
+                    before: '0',
+                    through: '0',
+                    reset: false,
+                    ids: [],
+                  }),
+                };
+          await raw.writeBatch([], {
+            indexPuts: [previous, ...(mixed ? [current] : [])],
+          });
+          const generation = new RoostHistoryGeneration(client, owner, id);
+          const error = `Unsupported Roost ${kind} receipt format`;
+          await expect(generation.resolve()).rejects.toThrow(error);
+          await expect(generation.lookupOperation(identity)).rejects.toThrow(error);
+          await expect(
+            generation.commitPatches([], [agentReceiptPut(identity, 'ef'.repeat(32))], undefined)
+          ).rejects.toThrow(error);
+          await expect(
+            generation.replace([nativeUser('must-not-write')], 'must-not-activate')
+          ).rejects.toThrow(error);
+          await expect(nativeFixture(id)).rejects.toThrow(error);
+          expect(await raw.readIndex([previous])).toEqual([new Uint8Array(previous.value)]);
+          expect(await raw.readIndex([current])).toEqual([
+            mixed ? new Uint8Array(current.value) : null,
+          ]);
+          expect(await raw.scanIndex('lody_history_generation_v1', new Uint8Array(), 1n)).toEqual(
+            []
+          );
+        }
+        const fresh = await nativeFixture();
+        await fresh.backend.appendHistoryTurn(nativeUser('independent'));
+        expect(await fresh.backend.readHistory()).toMatchObject([{ id: 'independent' }]);
+      } finally {
+        await client.close();
       }
-      const fresh = await nativeFixture();
-      await fresh.backend.appendHistoryTurn(nativeUser('independent'));
-      expect(await fresh.backend.readHistory()).toMatchObject([{ id: 'independent' }]);
-    } finally {
-      await client.close();
     }
-  });
+  );
 
   it('rolls back output and receipts together, then recovers a partially committed multi-chunk retry after reopen', async () => {
     let fixture = await nativeFixture(randomUUID());
