@@ -69,9 +69,6 @@ import { Identity } from '@loro-dev/roost';
 import { RoostNativeClient, RoostHostError } from '@loro-dev/roost-node';
 import { describeRoostHistoryFailure } from '../src/session/roost-history-diagnostics';
 import { RoostHistoryGeneration } from '../src/session/roost-history-generation';
-import {
-  RENDERER_HISTORY_CHANGES_TABLE,
-} from '../src/session/roost-history-changes';
 import { encodeRoostHistoryChange } from '../src/session/roost-history-change-codec';
 import {
   AGENT_RECEIPTS_TABLE,
@@ -2901,7 +2898,7 @@ describe('Production Roost compact agent receipts', () => {
       const receipts = identities.map((id, index) =>
         agentReceiptPut(id, index.toString(16).padStart(64, '0'))
       );
-      await generation.commitPatches([], receipts, undefined);
+      await generation.commitPatches([], receipts, undefined, []);
       for (const [index, id] of identities.entries())
         expect(await generation.lookupOperation(id)).toEqual({
           digest: index.toString(16).padStart(64, '0'),
@@ -2942,7 +2939,7 @@ describe('Production Roost compact agent receipts', () => {
     }
   });
 
-  it.each(['agent', 'renderer'] as const)(
+  it.each(['agent', 'renderer-v1', 'renderer-v2'] as const)(
     'rejects old and mixed %s receipt formats before opening or mutating a session, without deleting data',
     async (kind) => {
       const dbPath = join(nativeDirectory, 'history.db');
@@ -2973,7 +2970,8 @@ describe('Production Roost compact agent receipts', () => {
                   value: Buffer.from(JSON.stringify({ version: 1, digest: 'cd'.repeat(32) })),
                 }
               : {
-                  table: 'lody_renderer_history_changes_v1',
+                  table: kind === 'renderer-v1'
+                    ? 'lody_renderer_history_changes_v1' : 'lody_renderer_history_changes_v2',
                   key: Buffer.alloc(8),
                   value: Buffer.from(
                     JSON.stringify({
@@ -2987,39 +2985,33 @@ describe('Production Roost compact agent receipts', () => {
                     })
                   ),
                 };
-          const current =
-            kind === 'agent'
-              ? agentReceiptPut(identity, 'cd'.repeat(32))
-              : {
-                  table: RENDERER_HISTORY_CHANGES_TABLE,
-                  key: Buffer.alloc(8),
-                  value: encodeRoostHistoryChange({
-                    scope: 'ab'.repeat(32),
-                    nonce: id,
-                    before: '0',
-                    through: '0',
-                    reset: false,
-                    ids: [],
-                  }),
-                };
+          const current = kind === 'agent' ? agentReceiptPut(identity, 'cd'.repeat(32)) : null;
           await raw.writeBatch([], {
-            indexPuts: [previous, ...(mixed ? [current] : [])],
+            indexPuts: [previous, ...(mixed && current ? [current] : [])],
           });
+          const scope = Buffer.alloc(32, 0xab);
+          if (mixed && !current)
+            await raw.annotateCommit(scope, 0n, {
+              before: 0n, value: encodeRoostHistoryChange({ nonce: id, reset: false, ids: [] }),
+            });
+          const metadataBefore = await raw.readCommitMetadata(scope, 0n);
           const generation = new RoostHistoryGeneration(client, owner, id);
-          const error = `Unsupported Roost ${kind} receipt format`;
+          const error = `Unsupported Roost ${kind === 'agent' ? 'agent' : 'renderer'} receipt format`;
           await expect(generation.resolve()).rejects.toThrow(error);
           await expect(generation.lookupOperation(identity)).rejects.toThrow(error);
           await expect(
-            generation.commitPatches([], [agentReceiptPut(identity, 'ef'.repeat(32))], undefined)
+            generation.commitPatches([], [agentReceiptPut(identity, 'ef'.repeat(32))], undefined, [])
           ).rejects.toThrow(error);
           await expect(
             generation.replace([nativeUser('must-not-write')], 'must-not-activate')
           ).rejects.toThrow(error);
           await expect(nativeFixture(id)).rejects.toThrow(error);
           expect(await raw.readIndex([previous])).toEqual([new Uint8Array(previous.value)]);
-          expect(await raw.readIndex([current])).toEqual([
-            mixed ? new Uint8Array(current.value) : null,
-          ]);
+          if (current)
+            expect(await raw.readIndex([current])).toEqual([
+              mixed ? new Uint8Array(current.value) : null,
+            ]);
+          expect(await raw.readCommitMetadata(scope, 0n)).toEqual(metadataBefore);
           expect(await raw.scanIndex('lody_history_generation_v1', new Uint8Array(), 1n)).toEqual(
             []
           );
@@ -3039,6 +3031,7 @@ describe('Production Roost compact agent receipts', () => {
       ...nativeAssistant('atomic-output'),
       items: [{ type: 'text', text: '' }],
     });
+    const checkpoint = await fixture.backend.history.getCheckpoint!();
     const original = RoostHistoryGeneration.prototype.commitPatches;
     const input = {
       targetAssistantEntryId: 'atomic-output',
@@ -3047,14 +3040,15 @@ describe('Production Roost compact agent receipts', () => {
     };
     const rollback = vi
       .spyOn(RoostHistoryGeneration.prototype, 'commitPatches')
-      .mockImplementation(function (writes, receipts, cursor) {
+      .mockImplementation(function (writes, receipts, cursor, changedIds) {
         const edit = writes.find((write) => write.kind === 'edit');
         if (!edit) throw new Error('Expected native content edit');
         return original.call(
           this,
           [...writes, { ...edit, expectedNextSeq: edit.expectedNextSeq + 100n }],
           receipts,
-          cursor
+          cursor,
+          changedIds
         );
       });
     await expect(fixture.backend.applyAgentBatch(input)).rejects.toThrow();
@@ -3081,6 +3075,9 @@ describe('Production Roost compact agent receipts', () => {
     expect(before).toMatchObject({
       state: 'ready',
       turn: { items: [{ text: input.contents.map((item) => item.text).join('') }] },
+    });
+    expect(await fixture.backend.history.readChanges!(checkpoint)).toMatchObject({
+      state: 'ready', ids: ['atomic-output'],
     });
     await fixture.backend.applyAgentBatch({
       ...input,

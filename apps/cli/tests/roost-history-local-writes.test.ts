@@ -9,7 +9,7 @@ import { createRoostHistoryReader } from '@lody/shared/session-data';
 import { createRoostReadPort } from '../src/session/roost-history-port';
 import {
   createRoostHistoryChanges,
-  RENDERER_HISTORY_CHANGES_TABLE,
+  roostCommitMetadata,
 } from '../src/session/roost-history-changes';
 import {
   encodeRoostHistoryChange,
@@ -180,7 +180,7 @@ it('recovers verified native change intervals and refuses a missing interval aft
       () => stream,
       () => '00'.repeat(32)
     );
-    expect(await foreign.read(initial, 4n)).toMatchObject({ state: 'reset' });
+    await expect(foreign.read(initial, 4n)).rejects.toThrow();
   } finally {
     await client.close();
     await rm(directory, { recursive: true, force: true });
@@ -202,12 +202,9 @@ describe('Production Roost compact renderer receipts', () => {
     '\ufeff',
   ];
 
-  it('preserves exact identities and full-width cursors, rejecting malformed encodings', () => {
+  it('preserves exact identities and nonces, rejecting malformed encodings', () => {
     const receipt = {
-      scope,
       nonce,
-      before: '9007199254740993',
-      through: '18446744073709551615',
       reset: false,
       ids: [nonce],
     };
@@ -218,29 +215,28 @@ describe('Production Roost compact renderer receipts', () => {
       }
     }
     const encoded = Buffer.from(encodeRoostHistoryChange(receipt));
-    // A one-ID receipt retains all 128 UUID bits, both u64 cursors and the 256-bit scope.
-    expect(encoded.length).toBe(86);
+    // Native owns the scope/cursors; the payload retains all nonce and ID bits.
+    expect(encoded.length).toBe(38);
     for (let length = 0; length < encoded.length; length++)
       expect(() => decodeRoostHistoryChange(encoded.subarray(0, length))).toThrow();
     const corrupt = [Buffer.concat([encoded, Buffer.from([0])]), Buffer.from('{"version":1}')];
     for (const [offset, value] of [
-      [0, 1],
+      [0, 2],
       [1, 8],
-      [66, 255],
+      [18, 255],
     ] as const) {
       const bytes = Buffer.from(encoded);
       bytes[offset] = value;
       corrupt.push(bytes);
     }
-    // Generation replacement can reset the native cursor; retain that reset evidence.
-    const replaced = { ...receipt, through: '0', reset: true };
+    const replaced = { ...receipt, reset: true };
     expect(decodeRoostHistoryChange(encodeRoostHistoryChange(replaced))).toEqual(replaced);
     const unsafePosition = Buffer.from(encodeRoostHistoryChange({ ...receipt, from: 0 }));
-    unsafePosition.writeBigUInt64BE(0xffffffffffffffffn, 66);
+    unsafePosition.writeBigUInt64BE(0xffffffffffffffffn, 18);
     corrupt.push(unsafePosition);
     const jsonHeader = Buffer.from(
       encodeRoostHistoryChange({ ...receipt, ids: ['text'] })
-    ).subarray(0, 66);
+    ).subarray(0, 18);
     for (const body of [
       Buffer.from('[1]'),
       Buffer.from('["text"]x'),
@@ -248,8 +244,6 @@ describe('Production Roost compact renderer receipts', () => {
     ])
       corrupt.push(Buffer.concat([jsonHeader, body]));
     for (const bytes of corrupt) expect(() => decodeRoostHistoryChange(bytes)).toThrow();
-    expect(() => encodeRoostHistoryChange({ ...receipt, scope: scope.toUpperCase() })).toThrow();
-    expect(() => encodeRoostHistoryChange({ ...receipt, scope: `${scope.slice(1)}\n` })).toThrow();
     expect(() => encodeRoostHistoryChange({ ...receipt, nonce: nonce.toUpperCase() })).toThrow();
     expect(() =>
       encodeRoostHistoryChange({ ...receipt, from: Number.MAX_SAFE_INTEGER + 1 })
@@ -335,31 +329,55 @@ describe('Production Roost compact renderer receipts', () => {
         state: 'reset',
       });
 
-      const entry = {
-        table: RENDERER_HISTORY_CHANGES_TABLE,
-        key: Buffer.from('0000000000000001', 'hex'),
-      };
-      const [stored] = await stream.readIndex([entry]);
-      if (!stored) throw new Error('Expected persisted renderer receipt');
-      const original = decodeRoostHistoryChange(stored);
-      for (const change of [{ before: '1' }, { reset: true }, { scope: '00'.repeat(32) }]) {
-        await stream.writeBatch([], {
-          indexPuts: [{ ...entry, value: encodeRoostHistoryChange({ ...original, ...change }) }],
-        });
-        expect(await changes.read(checkpoint, 129n)).toMatchObject({ state: 'reset' });
-      }
-      await stream.writeBatch([], {
-        indexPuts: [{ ...entry, value: encodeRoostHistoryChange({ ...original, through: '2' }) }],
+      const bound = Buffer.from(scope, 'hex');
+      const stored = await stream.readCommitMetadata(bound, 129n);
+      if (!stored) throw new Error('Expected persisted renderer metadata');
+      const original = decodeRoostHistoryChange(stored.value);
+      await stream.annotateCommit(bound, 129n, { ...stored, before: 129n });
+      expect(await changes.read(checkpoint, 129n)).toMatchObject({ state: 'reset' });
+      await stream.annotateCommit(bound, 129n, {
+        ...stored,
+        value: encodeRoostHistoryChange({ ...original, reset: true }),
       });
-      await expect(changes.read(checkpoint, 129n)).rejects.toThrow('receipt is inconsistent');
-      await stream.writeBatch([], { indexPuts: [{ ...entry, value: stored.subarray(0, 10) }] });
+      expect(await changes.read(checkpoint, 129n)).toMatchObject({ state: 'reset' });
+      await expect(stream.annotateCommit(Buffer.alloc(32), 129n, stored)).rejects.toThrow();
+      await expect(stream.annotateCommit(bound, 1n, stored)).rejects.toThrow();
+      await stream.annotateCommit(bound, 129n, { ...stored, value: stored.value.subarray(0, 10) });
       await expect(changes.read(checkpoint, 129n)).rejects.toThrow('receipt is invalid');
-      await stream.writeBatch([], { indexPuts: [{ ...entry, value: stored }] });
+      await stream.annotateCommit(bound, 129n, stored);
       await expect(changes.record(129n, 130n, undefined, true)).rejects.toThrow();
       expect(await changes.read(checkpoint, 129n)).toEqual(expected);
       // A native commit without its derived receipt must still require full recovery.
       await advance(129);
       expect(await changes.read(expected.checkpoint, 130n)).toMatchObject({ state: 'reset' });
+
+      // A batch may straddle scan pages. Only its final annotation proves coverage.
+      const batched = client.stream('multi-event-batch');
+      const batchChanges = createRoostHistoryChanges(
+        () => batched,
+        () => scope
+      );
+      const batchStart = await batchChanges.checkpoint(0n);
+      await batched.writeBatch([], {
+        indexPuts: Array.from({ length: 129 }, (_, i) => ({
+          table: 'app_batch',
+          key: Buffer.from(String(i)),
+          value: Buffer.from([1]),
+          emitEvent: true,
+        })),
+        expectedEventCursor: 0n,
+        commitMetadata: roostCommitMetadata(scope, [nonce]),
+      });
+      expect(await batchChanges.read(batchStart, 129n)).toMatchObject({
+        state: 'ready',
+        ids: [nonce],
+      });
+      const batchCheckpoint = await batchChanges.checkpoint(129n);
+      await batched.create([], '"unannotated"');
+      await batched.writeBatch([{ kind: 'create', parents: [], contentJson: '"later"' }], {
+        commitMetadata: roostCommitMetadata(scope, ['later']),
+      });
+      expect(await batchChanges.read(batchCheckpoint, 131n)).toMatchObject({ state: 'reset' });
     } finally {
       await client.close();
       await rm(directory, { recursive: true, force: true });

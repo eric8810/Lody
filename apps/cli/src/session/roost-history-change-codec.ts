@@ -1,32 +1,22 @@
 import { z } from 'zod';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const cursor = z
-  .string()
-  .regex(/^\d+$/)
-  .refine((value) => BigInt(value) <= 0xffffffffffffffffn);
 const receiptSchema = z.object({
-  scope: z
-    .string()
-    .length(64)
-    .regex(/^[0-9a-f]{64}$/),
   nonce: z.string().length(36).regex(uuid),
-  before: cursor,
-  through: cursor,
   reset: z.boolean(),
   from: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   ids: z.array(z.string()),
 });
 export type RoostHistoryChangeReceipt = z.infer<typeof receiptSchema>;
 
-const headerBytes = 66; // version + flags + two u64 cursors + full scope hash + full nonce
+const headerBytes = 18; // version + flags + full nonce; scope/cursors belong to Native
 const invalid = () => new Error('Roost history change receipt is invalid');
 const uuidText = (bytes: Buffer) => {
   const hex = bytes.toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
 
-/** v2 is lossless: compact only canonical UUIDs, retain every other ID as JSON. */
+/** v3 is lossless: compact only canonical UUIDs, retain every other ID as JSON. */
 export function encodeRoostHistoryChange(receipt: RoostHistoryChangeReceipt): Uint8Array {
   receiptSchema.parse(receipt);
   const packedIds = receipt.ids.every((id) => id.length === 36 && uuid.test(id));
@@ -40,12 +30,9 @@ export function encodeRoostHistoryChange(receipt: RoostHistoryChangeReceipt): Ui
     );
   }
   const bytes = Buffer.alloc(headerBytes + (receipt.from === undefined ? 0 : 8) + ids.length);
-  bytes[0] = 2;
+  bytes[0] = 3;
   bytes[1] = (receipt.reset ? 1 : 0) | (receipt.from === undefined ? 0 : 2) | (packedIds ? 4 : 0);
-  bytes.writeBigUInt64BE(BigInt(receipt.before), 2);
-  bytes.writeBigUInt64BE(BigInt(receipt.through), 10);
-  bytes.write(receipt.scope, 18, 32, 'hex');
-  bytes.write(receipt.nonce.replaceAll('-', ''), 50, 16, 'hex');
+  bytes.write(receipt.nonce.replaceAll('-', ''), 2, 16, 'hex');
   if (receipt.from !== undefined) bytes.writeBigUInt64BE(BigInt(receipt.from), headerBytes);
   ids.copy(bytes, headerBytes + (receipt.from === undefined ? 0 : 8));
   return bytes;
@@ -53,7 +40,7 @@ export function encodeRoostHistoryChange(receipt: RoostHistoryChangeReceipt): Ui
 
 export function decodeRoostHistoryChange(value: Uint8Array): RoostHistoryChangeReceipt {
   const bytes = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-  if (bytes.length < headerBytes || bytes[0] !== 2) throw invalid();
+  if (bytes.length < headerBytes || bytes[0] !== 3) throw invalid();
   const flags = bytes.readUInt8(1);
   if ((flags & ~7) !== 0) throw invalid();
   const hasFrom = (flags & 2) !== 0;
@@ -71,10 +58,7 @@ export function decodeRoostHistoryChange(value: Uint8Array): RoostHistoryChangeR
     ids = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(offset)));
   }
   return receiptSchema.parse({
-    scope: bytes.subarray(18, 50).toString('hex'),
-    nonce: uuidText(bytes.subarray(50, 66)),
-    before: bytes.readBigUInt64BE(2).toString(),
-    through: bytes.readBigUInt64BE(10).toString(),
+    nonce: uuidText(bytes.subarray(2, 18)),
     reset: (flags & 1) !== 0,
     ...(hasFrom ? { from: Number(bytes.readBigUInt64BE(headerBytes)) } : {}),
     ids,

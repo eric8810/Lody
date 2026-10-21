@@ -417,18 +417,23 @@ keeps native SQLite durability distinct from the in-memory Loro reference.
 `sessionHistoryIncremental` v1 is negotiated separately from existing history paging.
 Checkpoint-bearing pages opt in with `withCheckpoint`; legacy page replies remain unchanged.
 `readChanges` verifies the previous checkpoint and returns complete changed identities plus
-any affected structural suffix, or an explicit reset. The native owner's local index records
-semantic change receipts after verifying the corresponding raw event interval. Receipts
+any affected structural suffix, or an explicit reset. The native owner attaches semantic
+metadata to the final event of a content transaction. Complex SDK operations annotate
+their final event only after verifying the whole interval, or record a reset. Receipts
 contain no history body, signing material or executable command, and emit no outgoing event.
 A crash or foreign mutation that leaves an uncovered interval requires reset. A checkpoint
 cannot claim acceptance or execution, and must not be copied between unrelated owner views.
 
-Local receipts use `lody_renderer_history_changes_v2`: full binary scope/nonce/cursors and
-compact UUID lists, with exact JSON encoding for other IDs. Every interval remains stored;
-checkpoint tokens and RPC replies are unchanged. The owner refuses generations containing
-v1 renderer receipts before recovery or mutation, without migration or deletion. Start a new
-test session after retiring the old CLI owner; simultaneous old/new owners are unsupported.
-See the [encoding decision](../../../../.agents/notes/implemented/bug-fix/2026-10-21-roost-renderer-receipt-encoding.md).
+Renderer v3 payloads retain full nonces, compact UUID lists, exact JSON for other IDs and
+optional structural positions. Native stores the full scope once per stream and owns
+the interval cursors. Reads scan bounded event pages and require complete interval coverage;
+an unannotated event is never skipped as evidence. Agent v2 identities/digests keep their
+direct index and compare absence inside the content transaction, including receipt-only
+operations with no event advance. Checkpoint tokens and RPC replies are unchanged.
+The owner requires `commit-metadata-v1` and refuses old renderer v1/v2 index formats without
+migration or deletion. Retire the old CLI owner and use a fresh test database for Native
+container 8. The Loro control document remains a separate publication transaction.
+See the [atomic metadata decision](../../../../.agents/notes/implemented/architecture/2026-10-21-roost-atomic-commit-metadata.md).
 
 Normal repairs request affected bodies with the change interval in one reply, bounded at
 500 changed/suffix bodies. Larger repairs use checkpoint-protected ranges. The renderer

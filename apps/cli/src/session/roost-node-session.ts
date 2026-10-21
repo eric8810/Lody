@@ -153,6 +153,8 @@ const acquireOwnerUnlocked = async (options: RoostNativeOptions): Promise<OwnerL
   });
   try {
     await client.ready;
+    if (!client.capabilities.includes('commit-metadata-v1'))
+      throw new Error('Roost Native commit metadata support is required; update the CLI package');
   } catch (error) {
     reportRoostHistoryFailure(error, { stage: 'initialize' });
     await client.close().catch(() => undefined);
@@ -1081,7 +1083,8 @@ const createNodeServicesForLease = async (
   const publishCursor = async (
     operationId: string,
     commandStartCursor: bigint,
-    verifyGoalCursor?: (cursor: bigint) => Promise<boolean>
+    verifyGoalCursor?: (cursor: bigint) => Promise<boolean>,
+    metadataCovered?: (cursor: bigint) => boolean
   ): Promise<void> => {
     const cursor = await roostHistory.observedEventCursor();
     const owned = verifyGoalCursor && (await verifyGoalCursor(cursor).catch(() => false));
@@ -1103,15 +1106,16 @@ const createNodeServicesForLease = async (
       }
     }
     const change = pendingChange;
-    await historyChanges.record(
-      commandStartCursor,
-      cursor,
-      pendingStructuralFrom === undefined
-        ? undefined
-        : { kind: 'structure', from: pendingStructuralFrom, to: totalHistoryCount },
-      Boolean(owned),
-      [...pendingChangedIds]
-    );
+    if (!owned || !metadataCovered?.(cursor))
+      await historyChanges.record(
+        commandStartCursor,
+        cursor,
+        pendingStructuralFrom === undefined
+          ? undefined
+          : { kind: 'structure', from: pendingStructuralFrom, to: totalHistoryCount },
+        Boolean(owned),
+        [...pendingChangedIds]
+      );
     const previous = await sessionDoc.getRoostHistoryCursor();
     const historyRevision = (previous?.historyRevision ?? 0) + 1;
     if (!Number.isSafeInteger(historyRevision)) {
@@ -1174,7 +1178,7 @@ const createNodeServicesForLease = async (
                 );
           const changed = await operation();
           if (changed !== false || pendingChange || pendingModelSummary)
-            await publishCursor(operationId, cursor, evidence.verify);
+            await publishCursor(operationId, cursor, evidence.verify, evidence.metadataCovered);
           return;
         } catch (error) {
           operationCursor = undefined;
@@ -1466,7 +1470,7 @@ const createNodeServicesForLease = async (
       }
     if (canPatch && patchWrites.length <= 64) {
       if (!patchWrites.length && !patchReceipts.length) return false;
-      await historyGeneration.commitPatches(patchWrites, patchReceipts, operationCursor);
+      await historyGeneration.commitPatches(patchWrites, patchReceipts, operationCursor, patchIds);
       await refreshTurnProjections(patchIds);
       for (const entry of prepared) rememberGoal(entry, positions.get(entry.id));
       if (patchIds.length) recordChange({ kind: 'changed', businessIds: patchIds });
