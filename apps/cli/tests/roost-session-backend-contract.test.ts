@@ -1432,9 +1432,7 @@ describe('Production Roost history semantics', () => {
     const updates = () => {
       const db = new Database(join(nativeDirectory, 'history.db'), { readonly: true });
       try {
-        const kv = db.pragma('user_version', { simple: true }) === 4
-          ? '(SELECT roost_spaces.name AS space, key, value FROM roost_kv JOIN roost_spaces ON roost_spaces.id = roost_kv.space_id)'
-          : 'roost_kv';
+        const kv = '(SELECT roost_spaces.name AS space, key, value FROM roost_kv JOIN roost_spaces ON roost_spaces.id = roost_kv.space_id)';
         return db.prepare(`SELECT key, value FROM ${kv} WHERE space LIKE ?`)
           .all(`%${fixture.doc.sessionId}%:updates`) as { key: Buffer; value: Buffer }[];
       } finally { db.close(); }
@@ -2823,13 +2821,8 @@ describe('Production Roost history semantics', () => {
     }
     const db = new Database(join(nativeDirectory, 'history.db'), { readonly: true });
     try {
-      const containerVersion = db.pragma('user_version', { simple: true });
-      expect([3, 4]).toContain(containerVersion);
-      const kvRows =
-        containerVersion === 4
-          ? `(SELECT roost_spaces.name AS space, key, value
-              FROM roost_kv JOIN roost_spaces ON roost_spaces.id = roost_kv.space_id)`
-          : 'roost_kv';
+      const kvRows = `(SELECT roost_spaces.name AS space, key, value
+        FROM roost_kv JOIN roost_spaces ON roost_spaces.id = roost_kv.space_id)`;
       const stats = db
         .prepare(`SELECT COUNT(*) AS rows, SUM(LENGTH(key) + LENGTH(value)) AS bytes
         FROM ${kvRows} WHERE space LIKE ?`)

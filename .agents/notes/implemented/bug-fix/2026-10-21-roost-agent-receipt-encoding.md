@@ -92,3 +92,20 @@ same-tuple SQLite layout probes independently saved 168–220 KiB. Actual worklo
 notification count and page layout determine the total reduction. Captured user
 content and benchmark databases remain outside the repository; the manual timing
 workload is not added to CI.
+
+## Validation against the next Native storage format
+
+The separate Roost Native change disables an unused generic outbox while retaining
+the update log, event journal and durable remote-sync work ledger. Lody already
+uses those Native APIs; no alternate runtime integration is required. Two
+footprint assertions treated every container other than v4 as the removed v3
+schema. They now query the interned namespace tables directly, as both published
+Native 0.2.0 and the candidate use that layout. Content, immutable-log, receipt-size
+and bounded-projection assertions remain; Native owns its version-gate tests.
+
+With `NAPI_RS_NATIVE_LIBRARY_PATH` selecting the candidate release addon, all 86
+adapter contract tests pass, including uncertain commits, restart, replay,
+pagination and sealed-history changes. The full repository `pnpm check`, format
+and docs checks also pass with the normal pinned dependencies. This validation
+does not change a package version or deploy either repository; the Native
+optimization still needs a coordinated release and an explicit dependency update.
