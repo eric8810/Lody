@@ -2,6 +2,7 @@
 
 Status: proposed
 Translation: current
+PR: https://github.com/LodyAI/Lody/pull/1804
 
 [English](2026-10-22-roost-owner-incremental-projection.md)
 
