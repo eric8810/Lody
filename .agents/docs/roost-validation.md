@@ -177,6 +177,11 @@ PY_CHECK
 
 ### Fixed-prefix dispatch
 
+This is a local-open and post-open selection benchmark. For the measured
+100/1,000/10,000-prefix results, use the
+[stage-separated result tables](../notes/proposed/architecture/2026-10-22-roost-dispatch-scalar-projection.md#selection-and-reads).
+Complete long-session recovery is not measured by this workload.
+
 Use the same opt-in config with `LONG_BENCH_DISPATCH=1`. For each backend and
 prefix of 100, 1,000 and 10,000 **logical messages**, run `prepare` in a fresh
 synthetic directory. It imports a completed alternating prefix (half as many
@@ -211,6 +216,10 @@ timing. SQLite `quick_check` remains an external, post-close check.
 it stops before backend initialization, transport sync, agent restoration and
 visible UI. `warmDispatch` follows that loading, and the write metric `resume`
 only reopens an assistant history entry. Neither is long-session recovery.
+Reports label these raw fields `localBackendOpen`, `firstSelectionAfterOpen`,
+`warmSelection` and `assistantEntryReopen`; retain original raw samples and their
+hashes when correcting prior summaries. Show min–max and n for one-off open/first
+selection trials rather than presenting two observations as a stable tail distribution.
 The prefix imports final turns rather than generating their full streaming edit
 sequences: matching final content does not match CRDT operation history.
 
@@ -244,6 +253,26 @@ The summary states which goal improved, which remained unchanged or regressed,
 and which is unproven. Every long-conversation conclusion includes both the
 memory-growth and latency tables and its measured scale. Never substitute a warm
 tail-write result for cold-open, memory or history-scaling evidence.
+
+### Recovery claims
+
+A recovery result identifies its exact start/end signals and historical edit
+sequence. Separate local backend open, backend initialization, remote catch-up,
+first readable conversation window, dispatch readiness, agent resume/replay and
+first visible output. Mark omitted stages `not measured`; do not add separately
+timed fragments and label their sum end-to-end recovery. A warm selection speedup
+does not establish a recovery speedup, and a baseline/current local-open comparison
+must be reported even when their ranges overlap.
+
+To evaluate recovery of streamed conversations, build both prefixes through the
+same declared sequence of user creation, per-chunk text/thought edits, tool/plan
+updates and completion, and record chunk counts/sizes, commit boundaries, snapshot
+or compaction behavior and any retained-operation statistics available. Final-turn
+bulk import alone cannot establish that the original edit history was reproduced.
+Use fresh owner processes and the intended reader/consumer; report local loading
+separately from transport and rendering rather than assuming either is negligible.
+
+### Memory interpretation
 
 Memory samples must identify actions performed before sampling. Walking to the
 oldest range can populate a page cache with the entire tested history; that is

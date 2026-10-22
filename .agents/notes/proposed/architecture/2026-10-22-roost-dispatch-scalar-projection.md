@@ -10,10 +10,12 @@ Translation: current
 The dispatcher still read and copied the entire transcript to find one input,
 despite the incremental writer and windowed renderer. This change queries a
 cursor-fenced local projection of pending inputs, requested identities and their
-completion evidence, then reads only the selected input body. Existing selection,
-repair, queue, cancellation and RPC deduplication rules remain authoritative.
+completion evidence, then reads only the selected input body under the existing
+selection, repair, queue, cancellation and RPC deduplication rules.
 At 10,000 completed messages, warm dispatch p50 fell from 369.40 ms to 2.63 ms
 (Loro: 199.41 ms), with 0.4–0.8 MiB dispatch RSS growth instead of 874–945 MiB.
+Local backend open was 6.47 s for Loro and 0.68–0.80 s for candidate Roost,
+overlapping baseline Roost's 0.67–0.93 s; complete long-session recovery was not measured.
 Missing or invalid projections still require bounded-page reconstruction;
 ordinary writes, full exports and index repair are separate costs.
 
@@ -172,20 +174,42 @@ not generate each historical response through repeated streaming edits. This
 still creates Loro operations, but does not reproduce a real conversation's
 edit sequence. Equal final business content does not establish equal operation
 history or recovery cost. No claim that Loro must be slower for those unmeasured
-cases follows from this experiment. In the write table, `resume` times only
-`openAssistantTurn` plus control persistence, not long-session restoration.
+cases follows from this experiment. The raw write metric `resume` is reported below as `assistantEntryReopen`: it
+times only `openAssistantTurn` plus control persistence, not session restoration.
 
-| Prefix / backend | Open ms | First dispatch ms | Warm dispatch ms |
-| --- | --- | --- | --- |
-| 100 / baseline | 652.00/652.00/652.00 | 322.74/322.74/322.74 | 4.25/9.40/12.33 |
-| 100 / candidate | 449.13/449.13/449.13 | 9.68/9.68/9.68 | 1.91/4.18/4.44 |
-| 100 / loro | 107.28/107.28/107.28 | 8.62/8.62/8.62 | 3.51/3.73/3.73 |
-| 1,000 / baseline | 544.86/544.86/544.86 | 2612.02/2612.02/2612.02 | 21.85/82.89/85.48 |
-| 1,000 / candidate | 444.04/444.04/444.04 | 9.42/9.42/9.42 | 1.95/3.14/3.26 |
-| 1,000 / loro | 785.91/785.91/785.91 | 33.98/33.98/33.98 | 18.32/20.76/20.76 |
-| 10,000 / baseline | 933.34/933.34/933.34 | 58329.02/58329.02/58329.02 | 369.40/467.09/499.23 |
-| 10,000 / candidate | 801.58/801.58/801.58 | 14.02/14.02/14.02 | 2.63/6.12/7.43 |
-| 10,000 / loro | 6469.78/6469.78/6469.78 | 354.24/354.24/354.24 | 199.41/264.20/264.20 |
+Local backend open is a separate stage. Values below are observed min–max,
+with trial counts; opened RSS is whole-process memory, and its growth is relative
+to that process's pre-open sample. The baseline/current Roost open ranges overlap:
+the dispatch change did not establish a local-open improvement. Loro has only one
+measurement trial at each prefix. Complete long-session recovery remains **not
+measured**, including the original streaming edit history and visible-consumer path.
+
+| Prefix / backend | Open n | Local backend open ms (min–max) | Opened RSS MiB | Open RSS growth MiB |
+| --- | --- | --- | --- | --- |
+| 100 / baseline | 2 | 371.03–652.00 | 363.6–364.5 | 63.1–66.4 |
+| 100 / candidate | 2 | 404.71–449.13 | 363.5–367.6 | 63.6–64.6 |
+| 100 / loro | 1 | 107.28 | 327.0 | 26.2 |
+| 1,000 / baseline | 2 | 438.30–544.86 | 365.5–367.2 | 67.0–69.2 |
+| 1,000 / candidate | 2 | 418.99–444.04 | 365.3–367.6 | 64.8–66.8 |
+| 1,000 / loro | 1 | 785.91 | 433.4 | 133.9 |
+| 10,000 / baseline | 2 | 673.23–933.34 | 391.9–413.1 | 93.6–113.1 |
+| 10,000 / candidate | 2 | 676.16–801.58 | 413.6–414.7 | 113.6–115.2 |
+| 10,000 / loro | 1 | 6469.78 | 1183.9 | 884.2 |
+
+The next table starts after local open. The approximately 76× comparison belongs
+only to its warm-selection column; first selection also excludes opening costs.
+
+| Prefix / backend | First-selection n | First selection after open ms (min–max) | Warm-selection n | Warm selection ms (p50/p95/max) |
+| --- | --- | --- | --- | --- |
+| 100 / baseline | 2 | 308.22–322.74 | 24 | 4.25/9.40/12.33 |
+| 100 / candidate | 2 | 9.04–9.68 | 24 | 1.91/4.18/4.44 |
+| 100 / loro | 1 | 8.62 | 12 | 3.51/3.73/3.73 |
+| 1,000 / baseline | 2 | 2441.48–2612.02 | 24 | 21.85/82.89/85.48 |
+| 1,000 / candidate | 2 | 9.14–9.42 | 24 | 1.95/3.14/3.26 |
+| 1,000 / loro | 1 | 33.98 | 12 | 18.32/20.76/20.76 |
+| 10,000 / baseline | 2 | 24943.54–58329.02 | 24 | 369.40/467.09/499.23 |
+| 10,000 / candidate | 2 | 12.37–14.02 | 24 | 2.63/6.12/7.43 |
+| 10,000 / loro | 1 | 354.24 | 12 | 199.41/264.20/264.20 |
 
 | Prefix / backend | Latest directory ms | Adjacent 20 bodies ms | Old ID ms | Full history ms |
 | --- | --- | --- | --- | --- |
@@ -207,55 +231,55 @@ Total includes acknowledgment and explicit control persistence; all three are sh
 | --- | --- | --- | --- | --- | --- |
 | 100 / baseline | textAppend | 40 | 10.91/79.90/107.21 | 10.88/79.57/106.98 | 0.03/0.16/0.25 |
 | 100 / baseline | finish | 2 | 20.72/20.72/20.72 | 20.66/20.66/20.66 | 0.03/0.03/0.03 |
-| 100 / baseline | resume | 2 | 63.20/63.20/63.20 | 63.16/63.16/63.16 | 0.02/0.02/0.02 |
+| 100 / baseline | assistantEntryReopen | 2 | 63.20/63.20/63.20 | 63.16/63.16/63.16 | 0.02/0.02/0.02 |
 | 100 / baseline | firstResumedAppend | 2 | 14.41/14.41/14.41 | 14.36/14.36/14.36 | 0.02/0.02/0.02 |
 | 100 / baseline | userCreation | 2 | 49.00/49.00/49.00 | 48.96/48.96/48.96 | 0.02/0.02/0.02 |
 | 100 / baseline | assistantCreation | 2 | 69.68/69.68/69.68 | 69.64/69.64/69.64 | 0.02/0.02/0.02 |
 | 100 / candidate | textAppend | 40 | 11.60/66.72/87.92 | 11.56/66.52/87.86 | 0.03/0.13/0.15 |
 | 100 / candidate | finish | 2 | 24.41/24.41/24.41 | 24.37/24.37/24.37 | 0.03/0.03/0.03 |
-| 100 / candidate | resume | 2 | 77.77/77.77/77.77 | 77.71/77.71/77.71 | 0.03/0.03/0.03 |
+| 100 / candidate | assistantEntryReopen | 2 | 77.77/77.77/77.77 | 77.71/77.71/77.71 | 0.03/0.03/0.03 |
 | 100 / candidate | firstResumedAppend | 2 | 15.86/15.86/15.86 | 15.80/15.80/15.80 | 0.03/0.03/0.03 |
 | 100 / candidate | userCreation | 2 | 60.73/60.73/60.73 | 60.66/60.66/60.66 | 0.03/0.03/0.03 |
 | 100 / candidate | assistantCreation | 2 | 71.85/71.85/71.85 | 71.79/71.79/71.79 | 0.04/0.04/0.04 |
 | 100 / loro | textAppend | 20 | 3.23/42.32/42.32 | 1.11/38.01/38.01 | 1.94/5.39/5.39 |
 | 100 / loro | finish | 1 | 4.71/4.71/4.71 | 2.56/2.56/2.56 | 2.12/2.12/2.12 |
-| 100 / loro | resume | 1 | 3.17/3.17/3.17 | 1.14/1.14/1.14 | 2.00/2.00/2.00 |
+| 100 / loro | assistantEntryReopen | 1 | 3.17/3.17/3.17 | 1.14/1.14/1.14 | 2.00/2.00/2.00 |
 | 100 / loro | firstResumedAppend | 1 | 5.26/5.26/5.26 | 3.33/3.33/3.33 | 1.90/1.90/1.90 |
 | 100 / loro | userCreation | 1 | 8.79/8.79/8.79 | 7.02/7.02/7.02 | 1.74/1.74/1.74 |
 | 100 / loro | assistantCreation | 1 | 7.48/7.48/7.48 | 5.25/5.25/5.25 | 2.21/2.21/2.21 |
 | 1,000 / baseline | textAppend | 40 | 12.19/82.99/102.30 | 12.15/82.68/101.99 | 0.03/0.20/0.22 |
 | 1,000 / baseline | finish | 2 | 20.87/20.87/20.87 | 20.81/20.81/20.81 | 0.03/0.03/0.03 |
-| 1,000 / baseline | resume | 2 | 62.71/62.71/62.71 | 62.65/62.65/62.65 | 0.03/0.03/0.03 |
+| 1,000 / baseline | assistantEntryReopen | 2 | 62.71/62.71/62.71 | 62.65/62.65/62.65 | 0.03/0.03/0.03 |
 | 1,000 / baseline | firstResumedAppend | 2 | 17.05/17.05/17.05 | 17.00/17.00/17.00 | 0.03/0.03/0.03 |
 | 1,000 / baseline | userCreation | 2 | 50.65/50.65/50.65 | 50.59/50.59/50.59 | 0.03/0.03/0.03 |
 | 1,000 / baseline | assistantCreation | 2 | 66.91/66.91/66.91 | 66.87/66.87/66.87 | 0.02/0.02/0.02 |
 | 1,000 / candidate | textAppend | 40 | 11.21/73.38/82.65 | 11.18/73.19/82.46 | 0.03/0.14/0.14 |
 | 1,000 / candidate | finish | 2 | 21.17/21.17/21.17 | 21.13/21.13/21.13 | 0.03/0.03/0.03 |
-| 1,000 / candidate | resume | 2 | 69.15/69.15/69.15 | 69.11/69.11/69.11 | 0.03/0.03/0.03 |
+| 1,000 / candidate | assistantEntryReopen | 2 | 69.15/69.15/69.15 | 69.11/69.11/69.11 | 0.03/0.03/0.03 |
 | 1,000 / candidate | firstResumedAppend | 2 | 15.18/15.18/15.18 | 15.14/15.14/15.14 | 0.02/0.02/0.02 |
 | 1,000 / candidate | userCreation | 2 | 51.94/51.94/51.94 | 51.89/51.89/51.89 | 0.02/0.02/0.02 |
 | 1,000 / candidate | assistantCreation | 2 | 73.60/73.60/73.60 | 73.56/73.56/73.56 | 0.02/0.02/0.02 |
 | 1,000 / loro | textAppend | 20 | 2.90/62.50/62.50 | 0.99/56.59/56.59 | 1.94/5.83/5.83 |
 | 1,000 / loro | finish | 1 | 4.46/4.46/4.46 | 2.27/2.27/2.27 | 2.16/2.16/2.16 |
-| 1,000 / loro | resume | 1 | 3.00/3.00/3.00 | 0.84/0.84/0.84 | 2.14/2.14/2.14 |
+| 1,000 / loro | assistantEntryReopen | 1 | 3.00/3.00/3.00 | 0.84/0.84/0.84 | 2.14/2.14/2.14 |
 | 1,000 / loro | firstResumedAppend | 1 | 16.46/16.46/16.46 | 14.50/14.50/14.50 | 1.91/1.91/1.91 |
 | 1,000 / loro | userCreation | 1 | 9.94/9.94/9.94 | 5.40/5.40/5.40 | 4.51/4.51/4.51 |
 | 1,000 / loro | assistantCreation | 1 | 9.67/9.67/9.67 | 7.45/7.45/7.45 | 2.19/2.19/2.19 |
 | 10,000 / baseline | textAppend | 40 | 15.33/227.35/278.04 | 15.27/227.14/277.72 | 0.03/0.14/0.23 |
 | 10,000 / baseline | finish | 2 | 23.93/23.93/23.93 | 23.88/23.88/23.88 | 0.02/0.02/0.02 |
-| 10,000 / baseline | resume | 2 | 74.95/74.95/74.95 | 74.90/74.90/74.90 | 0.02/0.02/0.02 |
+| 10,000 / baseline | assistantEntryReopen | 2 | 74.95/74.95/74.95 | 74.90/74.90/74.90 | 0.02/0.02/0.02 |
 | 10,000 / baseline | firstResumedAppend | 2 | 17.21/17.21/17.21 | 17.14/17.14/17.14 | 0.03/0.03/0.03 |
 | 10,000 / baseline | userCreation | 2 | 61.87/61.87/61.87 | 61.82/61.82/61.82 | 0.02/0.02/0.02 |
 | 10,000 / baseline | assistantCreation | 2 | 88.70/88.70/88.70 | 88.66/88.66/88.66 | 0.02/0.02/0.02 |
 | 10,000 / candidate | textAppend | 40 | 15.47/238.92/283.05 | 15.43/238.60/282.83 | 0.03/0.17/0.19 |
 | 10,000 / candidate | finish | 2 | 25.63/25.63/25.63 | 25.59/25.59/25.59 | 0.02/0.02/0.02 |
-| 10,000 / candidate | resume | 2 | 76.41/76.41/76.41 | 76.34/76.34/76.34 | 0.03/0.03/0.03 |
+| 10,000 / candidate | assistantEntryReopen | 2 | 76.41/76.41/76.41 | 76.34/76.34/76.34 | 0.03/0.03/0.03 |
 | 10,000 / candidate | firstResumedAppend | 2 | 28.84/28.84/28.84 | 28.78/28.78/28.78 | 0.03/0.03/0.03 |
 | 10,000 / candidate | userCreation | 2 | 66.45/66.45/66.45 | 66.38/66.38/66.38 | 0.04/0.04/0.04 |
 | 10,000 / candidate | assistantCreation | 2 | 88.87/88.87/88.87 | 88.82/88.82/88.82 | 0.03/0.03/0.03 |
 | 10,000 / loro | textAppend | 20 | 2.64/206.70/206.70 | 1.00/195.15/195.15 | 1.75/11.49/11.49 |
 | 10,000 / loro | finish | 1 | 5.39/5.39/5.39 | 3.55/3.55/3.55 | 1.81/1.81/1.81 |
-| 10,000 / loro | resume | 1 | 2.78/2.78/2.78 | 0.95/0.95/0.95 | 1.81/1.81/1.81 |
+| 10,000 / loro | assistantEntryReopen | 1 | 2.78/2.78/2.78 | 0.95/0.95/0.95 | 1.81/1.81/1.81 |
 | 10,000 / loro | firstResumedAppend | 1 | 133.42/133.42/133.42 | 131.19/131.19/131.19 | 2.20/2.20/2.20 |
 | 10,000 / loro | userCreation | 1 | 10.53/10.53/10.53 | 5.80/5.80/5.80 | 4.70/4.70/4.70 |
 | 10,000 / loro | assistantCreation | 1 | 9.70/9.70/9.70 | 7.40/7.40/7.40 | 2.26/2.26/2.26 |
