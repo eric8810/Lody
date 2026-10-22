@@ -99,7 +99,8 @@ Roost 已通过 Core SQLite 索引 15、Native 56、SDK Native 索引 37、进�
 检查；根 format 通过。把故障点下移到 SDK 确认之前后，Native 丢回复和 peer
 goal 两个增强用例也通过。最终 docs 为 0 错误、71 既有警告，无无关源码改动。
 Roost 配套 CI 的 linux-arm64 在编译前下载 pnpm 12.3.4 时 npm registry
-30 秒超时，没有 TypeScript 编译诊断；正在重跑失败 job。未宣称 Native 矩阵
+30 秒超时，没有 TypeScript 编译诊断；已尝试重跑，但 GitHub 返回 HTTP 403：Windows job 所在工作流仍在运行，尚未排入
+重跑。未宣称 Native 矩阵
 CI 已全绿；此消费者保持草稿，待配套包发布/更新 pin 和 hosted 检查完成。
 
 原子优化后新增主线程 V8 诊断：相同合成单回复 1000 × 1 KiB，关闭交错消费者
@@ -109,3 +110,8 @@ roost-content-patches.ts 13.72%、roost-node-session.ts 10.28%、GC 7.25%、
 Node js_transferable 3.51%、idle 26.30%。最大的具名应用函数包括
 stageRoostTextAppends 和 diff walk，证实增长正文的暂存/差异遍历/复制仍有成本；
 不能把剩余全部差距或独立的新消息/分页成本归给它们。本 PR 不再据此继续修改。
+
+
+消费者草稿：[Lody #1811](https://github.com/LodyAI/Lody/pull/1811)。Roost hosted
+Rust 检查及 Native darwin-arm64/darwin-x64/linux-x64 已通过。剩余平台 gate 和
+已发布配套依赖是明确的评审限制，没有修改任何生产会话或部署 staging。

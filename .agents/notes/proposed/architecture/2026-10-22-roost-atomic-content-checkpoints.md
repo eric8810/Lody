@@ -121,7 +121,8 @@ peer-goal cases pass after moving the fault below SDK acknowledgment. Final docs
 check has zero errors and 71 existing warnings. No unrelated source is changed.
 Roost companion CI's linux-arm64 job failed before compilation while downloading
 pnpm 12.3.4 from npm (30-second registry timeout). The failure is infrastructure,
-not a TypeScript diagnostic; the failed job is being retried. Native matrix CI is
+not a TypeScript diagnostic; retry was attempted, but GitHub returned HTTP 403 because the workflow containing
+the ongoing Windows jobs is still running. No retry is queued yet. Native matrix CI is
 not declared green. This release dependency remains a draft until matching
 Native/SDK packages can be pinned and the hosted checks complete.
 
@@ -135,3 +136,9 @@ application functions include stageRoostTextAppends and its diff walk. This
 confirms growing-body staging/diff/copy work remains; it does not attribute the
 whole remaining gap or the separate new-message/paging cost to those functions.
 No additional optimization follows from this diagnostic in this PR.
+
+
+Consumer draft: [Lody #1811](https://github.com/LodyAI/Lody/pull/1811).
+Hosted Roost Rust checks and Native darwin-arm64/darwin-x64/linux-x64 jobs have
+passed. The pending hosted platform gate and published package dependency are
+explicit review limits; no production session or staging deployment was changed.
