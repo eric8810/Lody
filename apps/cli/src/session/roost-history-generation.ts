@@ -72,13 +72,15 @@ export class RoostHistoryGeneration {
     writes: Write[],
     receipts: IndexPut[],
     cursor: bigint | undefined,
-    changedIds: readonly string[]
+    changedIds: readonly string[],
+    derivedIndexPuts: IndexPut[] = []
   ) {
-    return this.host.writeBatch(writes, {
+    return this.history.commitContentBatch(writes, {
       indexPuts: receipts,
       expectedEventCursor: cursor,
       expectedIndexes: receipts.map(({ table, key }) => ({ table, key, value: null })),
       commitMetadata: roostCommitMetadata(this.observationScope, changedIds),
+      derivedIndexPuts,
     });
   }
 

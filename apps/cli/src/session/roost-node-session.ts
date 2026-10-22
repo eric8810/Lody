@@ -64,7 +64,12 @@ import {
   type HistoryBatchCommand,
 } from '@loro-dev/roost/lody-history';
 import { Identity, decodeJson } from '@loro-dev/roost';
-import { RoostNativeClient, type Write, type IndexPut } from '@loro-dev/roost-node';
+import {
+  RoostNativeClient,
+  type Write,
+  type IndexPut,
+  type RoostNodeStream,
+} from '@loro-dev/roost-node';
 import type { SessionDocument } from '@/lib/loro/doc';
 import type { SessionAgentWrites } from '@/lib/loro/session-agent-writes';
 import { latestSessionModel } from '@/lib/loro/session-model-summary';
@@ -87,6 +92,8 @@ import { reportRoostHistoryFailure } from './roost-history-diagnostics';
 import { loadRoostOwnerSeedLegacy } from './roost-writer-identity';
 import {
   projectLatestGoal,
+  projectChangedGoal,
+  goalProjectionPut,
   readGoalProjection,
   writeGoalProjection,
   type RoostGoalProjection,
@@ -153,8 +160,11 @@ const acquireOwnerUnlocked = async (options: RoostNativeOptions): Promise<OwnerL
   });
   try {
     await client.ready;
-    if (!client.capabilities.includes('commit-metadata-v1'))
-      throw new Error('Roost Native commit metadata support is required; update the CLI package');
+    if (
+      !client.capabilities.includes('commit-metadata-v1') ||
+      !client.capabilities.includes('derived-indexes-v1')
+    )
+      throw new Error('Roost Native atomic checkpoint support is required; update the CLI package');
   } catch (error) {
     reportRoostHistoryFailure(error, { stage: 'initialize' });
     await client.close().catch(() => undefined);
@@ -1123,6 +1133,9 @@ const createNodeServicesForLease = async (
 
   const pendingSeen = new Map<string, Promise<void>>();
 
+  let committedGoal:
+    | { host: RoostNodeStream; cursor: bigint; latest: RoostGoalProjection }
+    | undefined;
   const publishCursor = async (
     operationId: string,
     commandStartCursor: bigint,
@@ -1139,12 +1152,19 @@ const createNodeServicesForLease = async (
       await reloadBranch({ publish: true });
     }
     if (goalProjection !== undefined) {
-      if (owned) {
+      if (
+        owned &&
+        !(
+          committedGoal?.host === historyHost &&
+          committedGoal.cursor === cursor &&
+          equal(committedGoal.latest, goalProjection)
+        )
+      ) {
         await writeGoalProjection(historyHost, cursor, goalProjection).catch(() => {
           goalProjection = undefined;
           needsRefresh = true;
         });
-      } else {
+      } else if (!owned) {
         goalProjection = undefined;
       }
     }
@@ -1201,6 +1221,7 @@ const createNodeServicesForLease = async (
       for (let attempt = 0; ; attempt += 1) {
         let evidence: ReturnType<RoostHistoryGeneration['trackWrites']> | undefined;
         try {
+          committedGoal = undefined;
           await historyGeneration.resolve();
           if (needsRefresh || reloadPromise || windowHistory !== historyGeneration.history) {
             await reloadBranch({ publish: true });
@@ -1242,6 +1263,7 @@ const createNodeServicesForLease = async (
           await reloadBranch({ publish: true });
           needsRefresh = false;
         } finally {
+          committedGoal = undefined;
           evidence?.stop();
           operationCursor = undefined;
         }
@@ -1318,25 +1340,9 @@ const createNodeServicesForLease = async (
   };
 
   const rememberGoal = (entry: SessionHistoryInput, position: number | undefined): void => {
-    const latest = projectLatestGoal([entry], position ?? 0);
-    if (position === undefined) {
-      if (latest || goalProjection?.turnId === entry.id) {
-        goalProjection = undefined;
-        goalCoveredStart = totalHistoryCount;
-      }
-      return;
-    }
-    if (latest) {
-      if (
-        goalProjection === null ||
-        (goalProjection !== undefined && position >= goalProjection.position) ||
-        position === totalHistoryCount - 1
-      )
-        goalProjection = latest;
-    } else if (goalProjection?.turnId === entry.id) {
-      goalProjection = undefined;
-      goalCoveredStart = totalHistoryCount;
-    }
+    const next = projectChangedGoal(goalProjection, entry, position, totalHistoryCount);
+    goalProjection = next.latest;
+    if (next.invalidated) goalCoveredStart = totalHistoryCount;
   };
 
   const planTurnWrite = async (
@@ -1558,12 +1564,41 @@ const createNodeServicesForLease = async (
           row: { ...row, content: decoded, nextSeq },
         });
       }
+      let nextGoal = goalProjection;
+      for (const entry of prepared)
+        nextGoal = projectChangedGoal(
+          nextGoal,
+          entry,
+          positions.get(entry.id),
+          totalHistoryCount
+        ).latest;
+      const stagedGoal = clone(nextGoal);
+      const commitHost = historyGeneration.host;
+      const through =
+        operationCursor === undefined
+          ? undefined
+          : operationCursor +
+            patchWrites.reduce(
+              (count, write) => count + (write.kind === 'edit' ? BigInt(write.ops.length) : 1n),
+              0n
+            );
       const commit = await historyGeneration.commitPatches(
         patchWrites,
         patchReceipts,
         operationCursor,
-        patchIds
+        patchIds,
+        stagedGoal !== undefined && through !== undefined
+          ? [goalProjectionPut(through, stagedGoal)]
+          : []
       );
+      if (
+        stagedGoal !== undefined &&
+        commit.derivedIndexesApplied &&
+        commit.before === operationCursor &&
+        commit.through === through &&
+        through !== undefined
+      )
+        committedGoal = { host: commitHost, cursor: through, latest: stagedGoal };
       await refreshTurnProjections(
         patchIds,
         commit.metadataAttached &&

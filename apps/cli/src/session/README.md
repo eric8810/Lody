@@ -437,9 +437,19 @@ the interval cursors. Reads scan bounded event pages and require complete interv
 an unannotated event is never skipped as evidence. Agent v2 identities/digests keep their
 direct index and compare absence inside the content transaction, including receipt-only
 operations with no event advance. Checkpoint tokens and RPC replies are unchanged.
-The owner requires `commit-metadata-v1` and refuses old renderer v1/v2 index formats without
-migration or deletion. Retire the old CLI owner and use a fresh test database for Native
-container 8. The Loro control document remains a separate publication transaction.
+The owner requires `commit-metadata-v1` and `derived-indexes-v1` and refuses old renderer
+v1/v2 index formats without migration or deletion. Use matching coordinated Native/SDK
+packages; this additive API does not change the v9 container. The Loro control document
+remains a separate publication transaction.
+
+For eligible published-body edits, the SDK plans its own binding/publication progress
+under settled cursor, identity/member and waiting-dependency comparisons. Native installs
+these conditional indexes, application receipts and a staged known goal projection in the
+content transaction only after proving the entire nonempty event interval is local and
+ends at the planned cursor. Only a confirmed `derivedIndexesApplied` result for the same
+host/cursor/value can suppress the later goal index write. Ordinary metadata is not that
+proof. Pending remote events, unknown goals, seals, other commands and lost replies retain
+full catch-up and recovery. No private SDK index formats are copied into Lody.
 See the [atomic metadata decision](../../../../.agents/notes/implemented/architecture/2026-10-21-roost-atomic-commit-metadata.md).
 
 Normal repairs request affected bodies with the change interval in one reply, bounded at

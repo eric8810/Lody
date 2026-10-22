@@ -70,6 +70,7 @@ import { decodeBatch, Identity } from '@loro-dev/roost';
 import { RoostNativeClient, RoostHostError } from '@loro-dev/roost-node';
 import { describeRoostHistoryFailure } from '../src/session/roost-history-diagnostics';
 import { RoostHistoryGeneration } from '../src/session/roost-history-generation';
+import { readGoalProjection } from '../src/session/roost-goal-projection';
 import { encodeRoostHistoryChange } from '../src/session/roost-history-change-codec';
 import {
   AGENT_RECEIPTS_TABLE,
@@ -1263,6 +1264,83 @@ describe('Production Roost history semantics', () => {
     expect(await fixture.backend.readHistory()).toEqual(complete);
   });
 
+  it('recovers atomically committed text, receipt and active goal after the Native reply is lost', async () => {
+    let fixture = await nativeFixture();
+    const id = fixture.doc.sessionId;
+    const turnId = 'atomic-goal-a';
+    await fixture.backend.appendHistoryTurn(nativeUser('atomic-goal-u'));
+    await fixture.backend.appendHistoryTurn({
+      ...nativeAssistant(turnId),
+      acpTurnId: 'atomic-goal-boundary',
+      items: [
+        { type: 'goal', threadId: 'atomic-goal', objective: 'Preserve this goal', status: 'active' },
+        { type: 'text', text: 'start' },
+      ],
+    });
+    const input = {
+      targetAssistantEntryId: turnId,
+      operationIds: ['atomic-goal-append'],
+      contents: [{ type: 'text' as const, text: '🙂' }],
+    };
+    const original = RoostNativeClient.prototype.request;
+    let committed = false;
+    const lost = vi.spyOn(RoostNativeClient.prototype, 'request').mockImplementation(async function (
+      ...args
+    ) {
+      const result = await original.apply(this, args);
+      const command = args[0];
+      if (!committed && command.method === 'writeBatch' && command.derivedIndexes) {
+        const commit = result as Awaited<
+          ReturnType<import('@loro-dev/roost-node').RoostNodeStream['writeBatch']>
+        >;
+        expect(commit.derivedIndexesApplied).toBe(true);
+        const host = this.stream(command.stream);
+        expect(await readGoalProjection(host, commit.through, 2)).toMatchObject({
+          turnId,
+          position: 1,
+          goal: { threadId: 'atomic-goal', status: 'active' },
+        });
+        const receipts = command.indexPuts.map((put) => ({
+          table: put.table,
+          key: Buffer.from(put.keyHex, 'hex'),
+        }));
+        expect((await host.readIndex(receipts)).map((value) => value && [...value])).toEqual(
+          command.indexPuts.map((put) => [...Buffer.from(put.valueHex, 'hex')])
+        );
+        committed = true;
+        // Lose the real Native reply before the SDK adopts its checkpoint.
+        throw new RoostHostError('unknownOutcome');
+      }
+      return result;
+    });
+    try {
+      await expect(fixture.backend.applyAgentBatch(input)).rejects.toMatchObject({
+        code: 'unknownOutcome',
+      });
+    } finally {
+      lost.mockRestore();
+    }
+    expect(committed).toBe(true);
+    await fixture.backend.applyAgentBatch(input);
+    const complete = await fixture.backend.readHistory();
+    expect(complete[1]?.items).toEqual([
+      { type: 'goal', threadId: 'atomic-goal', objective: 'Preserve this goal', status: 'active' },
+      { type: 'text', text: 'start🙂' },
+    ]);
+    expect(
+      await fixture.backend.replaceEditableTail({
+        expectedUserTurnId: 'atomic-goal-u',
+        expectedForkTurnId: 'atomic-goal-boundary',
+        replacement: nativeUser('atomic-goal-replacement') as never,
+      })
+    ).toMatchObject({ status: 'rejected', reason: { code: 'active_goal' } });
+    await fixture.close();
+    fixture = await nativeFixture(id);
+    expect(await fixture.backend.readHistory()).toEqual(complete);
+    await fixture.backend.applyAgentBatch(input);
+    expect(await fixture.backend.readHistory()).toEqual(complete);
+  });
+
   it('requires authoritative refresh for an uncertified commit and recovers its receipt without duplicating text', async () => {
     const fixture = await nativeFixture();
     const turnId = 'uncertified-append';
@@ -2108,6 +2186,10 @@ describe('Production Roost history semantics', () => {
       acpTurnId: 'concurrent-boundary',
     });
     await first.backend.appendHistoryTurn(nativeUser('concurrent-tail-u'));
+    await first.backend.appendHistoryTurn({
+      ...nativeAssistant('concurrent-tail-a'),
+      items: [{ type: 'text', text: 'start' }],
+    });
     const peer = await nativeFixture(first.doc.sessionId);
     const original = RoostHistoryGeneration.prototype.commitPatches;
     let injected = false;
@@ -2117,6 +2199,7 @@ describe('Production Roost history semantics', () => {
         const result = await original.apply(this, args);
         if (!injected) {
           injected = true;
+          expect(result.derivedIndexesApplied).toBe(true);
           await peer.backend.applyHistoryAction({
             kind: 'upsert-turn',
             turn: {
@@ -2137,10 +2220,10 @@ describe('Production Roost history semantics', () => {
         return result;
       });
     try {
-      await first.backend.applyHistoryAction({
-        kind: 'user-status',
-        turnId: 'concurrent-tail-u',
-        status: 'handled',
+      await first.backend.applyAgentBatch({
+        targetAssistantEntryId: 'concurrent-tail-a',
+        operationIds: ['concurrent-goal-append'],
+        contents: [{ type: 'text', text: '🙂' }],
       });
     } finally {
       spy.mockRestore();
@@ -2157,6 +2240,7 @@ describe('Production Roost history semantics', () => {
       'concurrent-goal-u',
       'concurrent-goal-a',
       'concurrent-tail-u',
+      'concurrent-tail-a',
     ]);
   });
 
