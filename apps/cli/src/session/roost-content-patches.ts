@@ -1,5 +1,10 @@
-import type { AgentHistoryTextAppend } from '@lody/shared';
-import { applicationJsonText, type HistoryIdentity } from '@loro-dev/roost/lody-history';
+import type { AgentHistoryTextAppend, AgentHistoryMutationPath } from '@lody/shared';
+import { decodeJson } from '@loro-dev/roost';
+import {
+  applicationJsonText,
+  toApplicationJson,
+  type HistoryIdentity,
+} from '@loro-dev/roost/lody-history';
 import type { ContentOp, IndexPut } from '@loro-dev/roost-node';
 import { encodeRoostContentText } from './roost-history-port';
 
@@ -45,11 +50,14 @@ export function decodeAgentReceipt(value: Uint8Array): { digest: string } {
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
-type TextAppend = Pick<AgentHistoryTextAppend, 'previous' | 'value' | 'text'>;
+export type TextAppend = Pick<AgentHistoryTextAppend, 'previous' | 'value' | 'text'>;
+export type TextAppendHints = ReadonlyMap<string, TextAppend>;
+export const contentPathKey = (path: ContentOp['path']) =>
+  JSON.stringify(path, (_key, value) => (typeof value === 'bigint' ? value.toString() : value));
 export function coalesceAgentTextAppends(
   appends: readonly AgentHistoryTextAppend[],
   turnId: string
-): ReadonlyMap<number, TextAppend> {
+): TextAppendHints {
   const result = new Map<number, TextAppend>(),
     invalid = new Set<number>();
   for (const append of appends) {
@@ -67,96 +75,144 @@ export function coalesceAgentTextAppends(
         : append
     );
   }
-  return result;
+  return new Map(
+    [...result].map(([index, value]) => [
+      contentPathKey([
+        { key: 'content' },
+        { key: 'items' },
+        { index: BigInt(index) },
+        { key: 'text' },
+      ]),
+      value,
+    ])
+  );
 }
-const textAppendAt = (path: ContentOp['path'], appends?: ReadonlyMap<number, TextAppend>) => {
-  const field = path[1],
-    index = path[2],
-    leaf = path[3];
-  return path.length === 4 &&
-    field &&
-    'key' in field &&
-    field.key === 'items' &&
-    index &&
-    'index' in index &&
-    leaf &&
-    'key' in leaf &&
-    leaf.key === 'text'
-    ? appends?.get(Number(index.index))
-    : undefined;
-};
+const textAppendAt = (path: ContentOp['path'], appends?: TextAppendHints) =>
+  appends?.get(contentPathKey(path));
 
-/** Private path copies only; these snapshots never escape through public reads. */
-export function stageRoostTextAppends<T>(
+/** Apply verified content operations with private path copies. Native remains
+ * authoritative for limits, ownership, sequence and final edited JSON validity. */
+export function stageRoostContent<T>(
   content: T,
   ops: readonly ContentOp[],
-  appends?: ReadonlyMap<number, TextAppend>
+  appends?: TextAppendHints,
+  representation: 'application' | 'sdk' = 'application'
 ): T | undefined {
+  const removed = Symbol('removed');
+  const json = (text: string): unknown => {
+    const value = decodeJson(new TextEncoder().encode(text));
+    return representation === 'sdk' ? value : toApplicationJson(value);
+  };
+  const offset = (text: string, scalar: bigint): number | undefined => {
+    if (scalar < 0n || scalar > BigInt(text.length)) return undefined;
+    let index = 0,
+      count = 0n;
+    for (const value of text) {
+      if (count === scalar) return index;
+      index += value.length;
+      count++;
+    }
+    return count === scalar ? index : undefined;
+  };
   let next: unknown = content;
   for (const op of ops) {
     const root = op.path[0];
-    if (
-      op.kind !== 'appendText' ||
-      op.path.length < 2 ||
-      !root ||
-      !('key' in root) ||
-      root.key !== 'content'
-    )
-      return undefined;
+    if (!root || !('key' in root) || root.key !== 'content') return undefined;
     const append = textAppendAt(op.path, appends);
+    const edit = (value: unknown): { value: unknown } | undefined => {
+      if (op.kind === 'set') return { value: json(op.contentJson) };
+      if (op.kind === 'remove') return { value: removed };
+      if (op.kind === 'spliceArray') {
+        const values = json(op.valuesJson);
+        if (
+          !Array.isArray(value) ||
+          !Array.isArray(values) ||
+          op.index < 0n ||
+          op.delete < 0n ||
+          op.index > BigInt(value.length) ||
+          op.delete > BigInt(value.length) - op.index
+        )
+          return undefined;
+        const at = Number(op.index),
+          end = at + Number(op.delete);
+        return { value: value.slice(0, at).concat(values, value.slice(end)) };
+      }
+      if (typeof value !== 'string') return undefined;
+      if (op.kind === 'appendText')
+        return {
+          value:
+            append && value === append.previous && op.text === append.text
+              ? append.value
+              : value + op.text,
+        };
+      const from = offset(value, op.index),
+        to = offset(value, op.index + op.delete);
+      if (from === undefined || to === undefined || op.delete < 0n) return undefined;
+      return { value: value.slice(0, from) + op.text + value.slice(to) };
+    };
     const visit = (parent: unknown, depth: number): { value: unknown } | undefined => {
+      if (depth === op.path.length) return edit(parent);
       const part = op.path[depth];
       if (!part) return undefined;
       const key = 'key' in part ? part.key : Number(part.index);
-      let value: unknown;
-      if (parent instanceof Map && 'key' in part && parent.has(key)) value = parent.get(key);
-      else if (
-        ((Array.isArray(parent) && 'index' in part && part.index < BigInt(parent.length)) ||
-          (object(parent) && !(parent instanceof Map) && 'key' in part)) &&
-        Object.hasOwn(parent, key)
+      const map = parent instanceof Map;
+      const array = Array.isArray(parent);
+      if (
+        map
+          ? !('key' in part)
+          : array
+            ? !('index' in part) || part.index < 0n || part.index >= BigInt(parent.length)
+            : !object(parent) || !('key' in part)
       )
-        value = Reflect.get(parent, key);
-      else return undefined;
-      let changed: unknown;
-      if (depth === op.path.length - 1) {
-        if (typeof value !== 'string') return undefined;
-        changed =
-          append && value === append.previous && op.text === append.text
-            ? append.value
-            : value + op.text;
-      } else {
-        const child = visit(value, depth + 1);
-        if (!child) return undefined;
-        changed = child.value;
-      }
-      if (parent instanceof Map) {
+        return undefined;
+      const exists = map ? parent.has(key) : Object.hasOwn(parent as object, key);
+      if (!exists && (depth !== op.path.length - 1 || op.kind !== 'set')) return undefined;
+      const old = map ? parent.get(key) : Reflect.get(parent as object, key);
+      const changed = visit(old, depth + 1);
+      if (!changed || (array && changed.value === removed)) return undefined;
+      if (map) {
         const copy = new Map(parent);
-        copy.set(key, changed);
-        return { value: copy };
+        if (changed.value === removed) copy.delete(key);
+        else copy.set(key, changed.value);
+        return {
+          value: exists
+            ? copy
+            : new Map([...copy].sort(([a], [b]) => Buffer.compare(Buffer.from(a), Buffer.from(b)))),
+        };
       }
-      const copy = Array.isArray(parent)
-        ? parent.slice()
-        : { ...(parent as Record<string, unknown>) };
-      Object.defineProperty(copy, key, {
-        value: changed,
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
-      return { value: copy };
+      const copy = array ? parent.slice() : { ...(parent as Record<string, unknown>) };
+      if (changed.value === removed) Reflect.deleteProperty(copy, key);
+      else
+        Object.defineProperty(copy, key, {
+          value: changed.value,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      return {
+        value:
+          !array && !exists
+            ? Object.fromEntries(
+                Object.entries(copy).sort(([a], [b]) =>
+                  Buffer.compare(Buffer.from(a), Buffer.from(b))
+                )
+              )
+            : copy,
+      };
     };
     const staged = visit(next, 1);
-    if (!staged) return undefined;
+    if (!staged || staged.value === removed) return undefined;
     next = staged.value;
   }
-  return ops.length ? (next as T) : undefined;
+  return next as T;
 }
 
 /** Diff validated content, preserving unchanged subtrees and native scalar text offsets. */
 export function roostContentPatches(
   before: unknown,
   after: unknown,
-  appends?: ReadonlyMap<number, TextAppend>
+  appends?: TextAppendHints,
+  changes?: readonly AgentHistoryMutationPath[]
 ): ContentOp[] {
   const ops: ContentOp[] = [];
   const walk = (left: unknown, right: unknown, path: ContentOp['path']) => {
@@ -175,23 +231,44 @@ export function roostContentPatches(
         ops.push({ kind: 'appendText', path, text: right.slice(left.length) });
         return;
       }
-      const old = Array.from(left),
-        next = Array.from(right);
-      let from = 0,
-        suffix = 0;
-      while (from < old.length && from < next.length && old[from] === next[from]) from++;
-      while (
-        suffix < old.length - from &&
-        suffix < next.length - from &&
-        old[old.length - 1 - suffix] === next[next.length - 1 - suffix]
-      )
-        suffix++;
+      let oldFrom = 0,
+        newFrom = 0,
+        from = 0;
+      while (oldFrom < left.length && newFrom < right.length) {
+        const oldScalar = left.codePointAt(oldFrom),
+          newScalar = right.codePointAt(newFrom);
+        if (oldScalar !== newScalar) break;
+        oldFrom += oldScalar !== undefined && oldScalar > 0xffff ? 2 : 1;
+        newFrom += newScalar !== undefined && newScalar > 0xffff ? 2 : 1;
+        from++;
+      }
+      const previousScalar = (text: string, end: number) => {
+        const low = text.charCodeAt(end - 1);
+        return low >= 0xdc00 &&
+          low <= 0xdfff &&
+          end > 1 &&
+          text.charCodeAt(end - 2) >= 0xd800 &&
+          text.charCodeAt(end - 2) <= 0xdbff
+          ? end - 2
+          : end - 1;
+      };
+      let oldEnd = left.length,
+        newEnd = right.length;
+      while (oldEnd > oldFrom && newEnd > newFrom) {
+        const a = previousScalar(left, oldEnd),
+          b = previousScalar(right, newEnd);
+        if (left.codePointAt(a) !== right.codePointAt(b)) break;
+        oldEnd = a;
+        newEnd = b;
+      }
+      let deleted = 0;
+      for (let i = oldFrom; i < oldEnd; deleted++) i += (left.codePointAt(i) ?? 0) > 0xffff ? 2 : 1;
       ops.push({
         kind: 'spliceText',
         path,
         index: BigInt(from),
-        delete: BigInt(old.length - from - suffix),
-        text: next.slice(from, next.length - suffix).join(''),
+        delete: BigInt(deleted),
+        text: right.slice(newFrom, newEnd),
       });
       return;
     }
@@ -232,6 +309,25 @@ export function roostContentPatches(
     }
     ops.push({ kind: 'set', path, contentJson: encodeRoostContentText(right) });
   };
-  walk(before, after, [{ key: 'content' }]);
+  if (
+    changes &&
+    object(before) &&
+    object(after) &&
+    !changes.some((change) => !change.path.length)
+  ) {
+    // Validation can normalize siblings inside an authored field. Select its
+    // complete validated subtree, never unrelated message fields or bodies.
+    const fields = new Set(
+      changes
+        .map((change) => change.path[0])
+        .filter((key): key is string => typeof key === 'string')
+    );
+    for (const key of fields)
+      walk(
+        Object.hasOwn(before, key) ? before[key] : undefined,
+        Object.hasOwn(after, key) ? after[key] : undefined,
+        [{ key: 'content' }, { key }]
+      );
+  } else walk(before, after, [{ key: 'content' }]);
   return ops;
 }

@@ -38,6 +38,8 @@ import {
 import { NodeLodyHistory, type HistoryIdentity } from '@loro-dev/roost/lody-history';
 import {
   CURRENT_MACHINE_PROTOCOL_CAPABILITIES,
+  applyNotificationOnHistory,
+  prepareReplacement,
   SessionHistoryReadResponseSchema,
   SessionHistoryWriteResponseSchema,
   getMachineRoomId,
@@ -64,6 +66,7 @@ import {
   hashHistoryEntryForVersion,
   hashText,
   applySessionHistoryPatches,
+  applyHistoryAction,
   type HistoryImportInput,
 } from '@lody/shared/session-data';
 import { decodeBatch, Identity } from '@loro-dev/roost';
@@ -4243,5 +4246,131 @@ describe.each(recoveryTurnCounts)('Roost cache recovery with %i retained turns',
       vi.restoreAllMocks();
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('Production Roost planned content operations', () => {
+  it('commits mixed markup, tool and plan updates without body readback, including resumed state', async () => {
+    const fixture = await nativeFixture();
+    const id = 'mixed-planned';
+    await fixture.backend.appendHistoryTurn(nativeUser('mixed-user'));
+    await fixture.backend.appendHistoryTurn({
+      ...nativeAssistant(id),
+      items: [
+        {
+          type: 'tool_call',
+          toolCallId: 'retained-tool',
+          status: 'completed',
+          rawOutput: { text: 'retained'.repeat(32768) },
+        },
+        { type: 'text', text: '' },
+      ],
+    });
+    const original = RoostNativeClient.prototype.request;
+    let forbidBody = false;
+    vi.spyOn(RoostNativeClient.prototype, 'request').mockImplementation(async function (...args) {
+      if (forbidBody && ['readTurn', 'readTurns'].includes(args[0].method))
+        throw new Error('Synthetic body readback unavailable');
+      return original.apply(this, args);
+    });
+    const events = [
+      {
+        sessionUpdate: 'agent_message_chunk' as const,
+        content: { type: 'text' as const, text: '\n<thinking>🙂' },
+      },
+      {
+        sessionUpdate: 'agent_message_chunk' as const,
+        content: { type: 'text' as const, text: 'reasoning\n</thinking>\nanswer🚀' },
+      },
+      {
+        sessionUpdate: 'tool_call' as const,
+        toolCallId: 'new-tool',
+        title: 'Synthetic',
+        status: 'in_progress' as const,
+        rawInput: { nested: ['a', '🙂'] },
+      },
+      {
+        sessionUpdate: 'tool_call_update' as const,
+        toolCallId: 'new-tool',
+        status: 'completed' as const,
+        rawOutput: { nested: [1, null, { result: '🚀' }] },
+      },
+      {
+        sessionUpdate: 'plan' as const,
+        entries: [{ content: 'first', priority: 'medium' as const, status: 'pending' as const }],
+      },
+      {
+        sessionUpdate: 'agent_message_chunk' as const,
+        content: {
+          type: 'text' as const,
+          text: '\n<proposed_plan>\nstep 🙂\n</proposed_plan>\nend',
+        },
+      },
+    ];
+    for (const phase of ['primary', 'resumed'] as const) {
+      if (phase === 'resumed') {
+        const action = {
+          kind: 'finish-assistant',
+          turnId: id,
+          endedAt: 42,
+        } as const;
+        const previous = await fixture.backend.readTurn(id);
+        if (previous.state !== 'ready') throw new Error('Expected turn before finish');
+        const reference = applyHistoryAction([structuredClone(previous.turn)], action).turns[0];
+        forbidBody = true;
+        try {
+          await fixture.backend.applyHistoryAction(action);
+        } finally {
+          forbidBody = false;
+        }
+        expect(await fixture.backend.readTurn(id)).toMatchObject({
+          state: 'ready',
+          turn: reference,
+        });
+        await fixture.backend.openAssistantTurn({ turnId: id, userTurnId: 'mixed-user' });
+      }
+      const initial = await fixture.backend.readTurn(id);
+      if (initial.state !== 'ready') throw new Error('Expected planned turn');
+      let reference = [initial.turn] as SessionHistoryInput[];
+      for (const [index, update] of events.entries()) {
+        const notification = { sessionId: 'synthetic-acp', update };
+        const previous = reference;
+        const next = structuredClone(reference);
+        applyNotificationOnHistory(next, [notification], undefined, { targetAssistantEntryId: id });
+        reference = JSON.parse(
+          JSON.stringify(next.map((entry, i) => prepareReplacement(previous[i], entry)))
+        ) as SessionHistoryInput[];
+        forbidBody = true;
+        try {
+          await fixture.backend.applyAgentBatch({
+            targetAssistantEntryId: id,
+            notifications: [notification],
+            operationIds: [`${phase}-${index}`],
+          });
+        } finally {
+          forbidBody = false;
+        }
+        expect(await fixture.backend.readTurn(id)).toMatchObject({
+          state: 'ready',
+          turn: reference[0],
+        });
+      }
+      const fresh = await nativeFixture(fixture.doc.sessionId);
+      expect(JSON.stringify(await fresh.backend.readTurn(id))).toBe(
+        JSON.stringify(await fixture.backend.readTurn(id))
+      );
+      await fresh.close();
+    }
+    const before = JSON.stringify(await fixture.backend.readTurn(id));
+    await fixture.backend.applyAgentBatch({
+      targetAssistantEntryId: id,
+      notifications: [{ sessionId: 'synthetic-acp', update: events[5] as (typeof events)[number] }],
+      operationIds: ['resumed-5'],
+    });
+    expect(JSON.stringify(await fixture.backend.readTurn(id))).toBe(before);
+    const sessionId = fixture.doc.sessionId;
+    await fixture.close();
+    const reopened = await nativeFixture(sessionId);
+    expect(JSON.stringify(await reopened.backend.readTurn(id))).toBe(before);
   });
 });

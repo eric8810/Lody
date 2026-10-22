@@ -15,6 +15,7 @@ import { createSessionBackend } from '../src/session/session-backend';
 import {
   getSessionRoomId,
   SessionStatusFactory,
+  applyNotificationOnHistory,
   type SessionId,
   type SessionHistoryInput,
 } from '@lody/shared';
@@ -30,6 +31,7 @@ const rounds = Number(process.env.LONG_BENCH_ROUNDS ?? 100);
 const chunks = Number(process.env.LONG_BENCH_CHUNKS ?? 20);
 const chunkBytes = Number(process.env.LONG_BENCH_CHUNK_BYTES ?? 256);
 const toolBytes = Number(process.env.LONG_BENCH_TOOL_BYTES ?? 16384);
+const mixed = process.env.LONG_BENCH_MIXED === '1';
 const stage = process.env.LONG_BENCH_STAGE ?? 'write';
 const sampleSuffix = process.env.LONG_BENCH_SAMPLE_SUFFIX ?? '';
 assert.ok(['write', 'reopen', 'paging'].includes(stage), 'Unknown benchmark stage');
@@ -53,6 +55,64 @@ const text = (seed: string, bytes: number) => {
     out += createHash('sha256').update(`${seed}/${i}`).digest('base64url');
   return out.slice(0, bytes);
 };
+const updates = (round: number, index: number) => {
+  const body = text(`chunk/${round}/${index}`, chunkBytes);
+  const textValue = mixed
+    ? `${index === 0 ? '\n<thinking>\n' : ''}${index === Math.floor(chunks / 3) ? '\n</thinking>\n' : ''}${body}${index % 17 === 0 ? '🙂' : ''}`
+    : body;
+  return [
+    {
+      sessionId: 'synthetic-acp',
+      update: {
+        sessionUpdate: 'agent_message_chunk' as const,
+        content: { type: 'text' as const, text: textValue },
+      },
+    },
+    ...(mixed && index % 10 === 0
+      ? [
+          {
+            sessionId: 'synthetic-acp',
+            update: {
+              sessionUpdate: 'tool_call_update' as const,
+              toolCallId: `tool-${round}`,
+              title: `Synthetic update ${index}`,
+              status: 'completed' as const,
+            },
+          },
+          {
+            sessionId: 'synthetic-acp',
+            update: {
+              sessionUpdate: 'plan' as const,
+              entries: [
+                {
+                  content: `step ${index}`,
+                  priority: 'medium' as const,
+                  status: 'pending' as const,
+                },
+              ],
+            },
+          },
+        ]
+      : []),
+  ];
+};
+const assistantFixture = (round: number): SessionHistoryInput => ({
+  id: `assistant-${round}`,
+  role: 'assistant',
+  timestamp: '2026-10-22T00:00:01.000Z',
+  finished: false,
+  items: [
+    {
+      type: 'tool_call',
+      toolCallId: `tool-${round}`,
+      status: 'completed',
+      title: 'Synthetic output',
+      rawOutput: { text: text(`tool/${round}`, toolBytes) },
+    },
+    { type: 'text', text: '' },
+  ],
+  fileDiff: [],
+});
 const stats = (samples: number[]) => {
   const sorted = [...samples].sort((a, b) => a - b);
   return {
@@ -156,15 +216,25 @@ it('measures durable long-conversation writes and windowed reads', async () => {
           .map((x) => x.text)
           .join('')
       ).toBe(text(`user/${round}`, 256));
-      const expected = Array.from({ length: chunks }, (_, i) =>
-        text(`chunk/${round}/${i}`, chunkBytes)
-      ).join('');
-      expect(
-        a.items
-          .filter((x) => x.type === 'text')
-          .map((x) => x.text)
-          .join('')
-      ).toBe(expected);
+      if (mixed) {
+        const expected = [assistantFixture(round)];
+        for (let i = 0; i < chunks; i++)
+          applyNotificationOnHistory(expected, updates(round, i), undefined, {
+            targetAssistantEntryId: a.id,
+          });
+        expect(canonical(a.items)).toEqual(canonical(expected[0]?.items));
+        expect(a.plan).toEqual(expected[0]?.plan);
+      } else {
+        const expected = Array.from({ length: chunks }, (_, i) =>
+          text(`chunk/${round}/${i}`, chunkBytes)
+        ).join('');
+        expect(
+          a.items
+            .filter((x) => x.type === 'text')
+            .map((x) => x.text)
+            .join('')
+        ).toBe(expected);
+      }
       const tool = a.items.find((x) => x.type === 'tool_call');
       expect(tool && tool.type === 'tool_call' && tool.rawOutput).toEqual({
         text: text(`tool/${round}`, toolBytes),
@@ -173,7 +243,12 @@ it('measures durable long-conversation writes and windowed reads', async () => {
     }
     const json = JSON.stringify(entries);
     // Compare business content across backends without storage-specific timestamps/metadata.
-    const content = entries.map((e) => ({ id: e.id, role: e.role, items: e.items }));
+    const content = entries.map((e) => ({
+      id: e.id,
+      role: e.role,
+      items: e.items,
+      ...(mixed ? { plan: e.plan } : {}),
+    }));
     return {
       visibleJsonBytes: Buffer.byteLength(json),
       fullDigest: digest(json),
@@ -283,6 +358,7 @@ it('measures durable long-conversation writes and windowed reads', async () => {
     const samples: number[] = [],
       liveChanges: number[] = [],
       appendMs: number[] = [],
+      resumeMs: number[] = [],
       finishMs: number[] = [];
     const windows: unknown[] = [];
     let checkpoint = await backend.history.getCheckpoint?.();
@@ -324,23 +400,7 @@ it('measures durable long-conversation writes and windowed reads', async () => {
         items: [{ type: 'text', text: text(`user/${round}`, 256) }],
         fileDiff: [],
       };
-      const assistant: SessionHistoryInput = {
-        id: `assistant-${round}`,
-        role: 'assistant',
-        timestamp: '2026-10-22T00:00:01.000Z',
-        finished: false,
-        items: [
-          {
-            type: 'tool_call',
-            toolCallId: `tool-${round}`,
-            status: 'completed',
-            title: 'Synthetic output',
-            rawOutput: { text: text(`tool/${round}`, toolBytes) },
-          },
-          { type: 'text', text: '' },
-        ],
-        fileDiff: [],
-      };
+      const assistant = assistantFixture(round);
       for (const entry of [user, assistant])
         appendMs.push(
           (
@@ -352,19 +412,28 @@ it('measures durable long-conversation writes and windowed reads', async () => {
         );
       checkpoint = await backend.history.getCheckpoint?.();
       for (let i = 0; i < chunks; i++) {
-        const chunk = text(`chunk/${round}/${i}`, chunkBytes);
+        if (mixed && i === Math.floor(chunks / 2)) {
+          resumeMs.push(
+            (
+              await timer(async () => {
+                await backend.applyHistoryAction({
+                  kind: 'finish-assistant',
+                  turnId: assistant.id,
+                  endedAt: 21,
+                });
+                await persist();
+                await backend.openAssistantTurn({ turnId: assistant.id, userTurnId: user.id });
+                await persist();
+              })
+            ).ms
+          );
+          checkpoint = await backend.history.getCheckpoint?.();
+        }
+        const notifications = updates(round, i);
         const input = {
           targetAssistantEntryId: assistant.id,
-          notifications: [
-            {
-              sessionId: 'synthetic-acp',
-              update: {
-                sessionUpdate: 'agent_message_chunk' as const,
-                content: { type: 'text' as const, text: chunk },
-              },
-            },
-          ],
-          operationIds: [`notification-${round}-${i}`],
+          notifications,
+          operationIds: notifications.map((_, n) => `notification-${round}-${i}-${n}`),
         };
         const cpu = process.cpuUsage();
         samples.push(
@@ -427,11 +496,13 @@ it('measures durable long-conversation writes and windowed reads', async () => {
       chunks,
       chunkBytes,
       toolBytes,
+      mixed,
       ...final,
       empty,
       ...size(),
       writes: stats(samples),
       append: stats(appendMs),
+      resume: stats(resumeMs),
       finish: stats(finishMs),
       liveChanges: stats(liveChanges),
       catchUp,

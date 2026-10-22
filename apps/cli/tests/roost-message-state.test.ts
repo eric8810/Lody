@@ -2,7 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   createRoostMessageState,
   projectRoostMessageState,
+  planRoostMessageState,
 } from '../src/session/roost-message-state';
+
+import {
+  coalesceAgentTextAppends,
+  roostContentPatches,
+  stageRoostContent,
+} from '../src/session/roost-content-patches';
 
 const primaryId = '01'.repeat(16);
 describe('Roost message state', () => {
@@ -46,6 +53,54 @@ describe('Roost message state', () => {
         JSON.parse(JSON.stringify(next))
       );
     }
+  });
+
+  it('composes resumed streaming and unrelated edits without copying the sealed primary', () => {
+    const primary = {
+      id: 'a',
+      finished: true,
+      endedAt: 42,
+      items: [{ type: 'text', text: 'base🙂' }],
+      untouched: { text: 'retained'.repeat(32768) },
+    };
+    let before = { ...primary, finished: false };
+    let state = createRoostMessageState(primary, primaryId, before);
+    for (let index = 0; index < 32; index++) {
+      const previous = before.items[0]?.text ?? '';
+      const delta = `${index}🚀`;
+      const next = { ...before, items: [{ type: 'text', text: previous + delta }] };
+      const plan = planRoostMessageState(
+        primary,
+        primaryId,
+        state,
+        before,
+        next,
+        coalesceAgentTextAppends(
+          [{ turnId: 'a', itemIndex: 0, previous, value: previous + delta, text: delta }],
+          'a'
+        ),
+        [{ turnId: 'a', path: ['items', 0, 'text'] }]
+      );
+      const ops = roostContentPatches(state, plan.content, plan.appends);
+      expect(stageRoostContent(state, ops)).toEqual(plan.content);
+      state = plan.content;
+      const projected = projectRoostMessageState(primary, primaryId, state) as typeof next;
+      expect(projected).toEqual(next);
+      expect(projected.untouched).toBe(primary.untouched);
+      expect(projected.items).not.toBe(primary.items);
+      expect(state.patches.length).toBeLessThanOrEqual(2);
+      before = next;
+    }
+    const next = { ...before, endedAt: undefined, plan: [{ content: 'new', status: 'pending' }] };
+    const plan = planRoostMessageState(primary, primaryId, state, before, next, undefined, [
+      { turnId: 'a', path: ['endedAt'] },
+      { turnId: 'a', path: ['plan'] },
+    ]);
+    expect(projectRoostMessageState(primary, primaryId, plan.content)).toEqual(
+      JSON.parse(JSON.stringify(next))
+    );
+    expect(primary.items[0]?.text).toBe('base🙂');
+    expect(primary.finished).toBe(true);
   });
 
   it('rejects another primary, invalid offsets and inherited paths', () => {

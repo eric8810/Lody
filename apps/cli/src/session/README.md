@@ -712,17 +712,24 @@ executes this and observation programs through the same FileLocks runtime; a fai
 metadata scratch release retains its path and bounded retry capability. Bare
 clone/fetch, full mutations and long-lived GC still require their own native owners.
 
-For a text-only append to an installed unsealed primary, the owner stages private
-SDK/application snapshots from the planned native paths. It may install them only
-when the atomic commit certifies the complete event interval and the window is
-unchanged. Other patches, uncertain replies and external changes retain the
-authoritative refresh path. Checkpoint publication still verifies ownership. Sealed window rows may reuse
+The semantic reducer and history-action planner record authored paths while
+sharing untouched private values. Persistence compiles only the affected validated
+top-level fields; actual text rewrites still use compact scalar-indexed splices.
+The owner stages all supported content operations on private SDK/application
+snapshots, including an existing state overlay. It may install them only when the
+atomic commit certifies the complete event interval and the window is unchanged;
+state reuse also requires the derived-index group to have applied. A simultaneous
+seal reads its authoritative header/hash. Unknown operations, uncertain replies and
+external changes retain authoritative refresh. Checkpoint publication still verifies ownership. Sealed window rows may reuse
 private decoded content only within the same SDK handle, with the complete
 physical identity, sequence, seal hash and parents unchanged. SDK-owned branch
 selection and current state/permission overlays still run. New windows share
 one decode between projection and installation. Sealing an installed primary
 refreshes that row's authoritative sequence/hash; publication still reloads the
 branch if its event interval includes foreign or unaccounted work.
+Resumed state composes verified text appends and rebuilds only affected fields'
+baseline-relative deltas for other changes. Projection uses private path copies
+instead of deep-copying the primary; public reads remain detached.
 
 ## Conversation-tree stop
 

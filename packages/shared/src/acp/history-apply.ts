@@ -3,8 +3,12 @@ import { isLodySubagentEvent, type LodySubagentEvent } from 'acp-extension-core'
 import type { SessionHistoryInput, SessionPlanEntry } from '../schema';
 import type { AgentHistoryTargets } from '../history-agent-window';
 import { sanitizeLodyInternalInstructions } from '../goal';
-import { Immer } from 'immer';
-import { mergeHistoryStreamText as mergeStreamText, hasAssistantTextTags, shouldDedupeHistoryChunk as shouldDedupeChunk } from '../history-stream-text';
+import { Immer, enablePatches, type Patch } from 'immer';
+import {
+  mergeHistoryStreamText as mergeStreamText,
+  hasAssistantTextTags,
+  shouldDedupeHistoryChunk as shouldDedupeChunk,
+} from '../history-stream-text';
 
 import { parseCodexTerminalCommand, parseCodexTerminalOutput } from './codex-raw';
 import type { AcpSessionNotification } from './schema';
@@ -2097,10 +2101,14 @@ class NotificationOnHistoryApplier {
       }
       items[items.length - 1] = merged.item;
       const turnId = this.history[entryIndex]?.id;
-      if (turnId && merged.suffix !== undefined) this.textAppends?.push({
-        turnId, itemIndex: items.length - 1, previous: existing.text,
-        value: text, text: merged.suffix,
-      });
+      if (turnId && merged.suffix !== undefined)
+        this.textAppends?.push({
+          turnId,
+          itemIndex: items.length - 1,
+          previous: existing.text,
+          value: text,
+          text: merged.suffix,
+        });
       this.touchedAssistantEntryIndices.add(entryIndex);
       this.changed = true;
       return;
@@ -2277,7 +2285,10 @@ export const applyNotificationOnHistoryWithChange = (
   return { history: nextHistory, changed: applier.hasChanges() };
 };
 
+enablePatches();
 const mutationImmer = new Immer({ autoFreeze: false, useStrictShallowCopy: true });
+/** Authored paths, before validation; values always come from the validated result. */
+export type AgentHistoryMutationPath = { turnId: string; path: readonly (string | number)[] };
 export type AgentHistoryMutationEvent =
   | { kind: 'notification'; value: AcpSessionNotification }
   | { kind: 'content'; value: MessageContent };
@@ -2288,21 +2299,59 @@ export function planAgentHistoryMutation(
   events: readonly AgentHistoryMutationEvent[],
   model?: ModelInfo,
   options: ApplyNotificationOnHistoryOptions = {}
-): { history: SessionHistoryInput[]; textAppends: AgentHistoryTextAppend[] } {
+): {
+  history: SessionHistoryInput[];
+  textAppends: AgentHistoryTextAppend[];
+  changes: AgentHistoryMutationPath[];
+} {
   const textAppends: AgentHistoryTextAppend[] = [];
+  const changes: AgentHistoryMutationPath[] = [];
   let next = history;
   // Preserve the current per-event post-processing and transport order.
   const ownedEvents = structuredClone(events);
   const ownedModel = model === undefined ? undefined : structuredClone(model);
-  for (const event of ownedEvents) next = mutationImmer.produce(next, (draft) => {
-    if (event.kind === 'notification') {
-      new NotificationOnHistoryApplier(draft, options, ownedModel, textAppends).apply([event.value]);
-    } else {
-      const applied = applyMessageContentsBatch(draft, [event.value], { ...options, model: ownedModel });
-      draft.splice(0, draft.length, ...applied);
+  for (const event of ownedEvents) {
+    let patches: Patch[] = [];
+    next = mutationImmer.produce(
+      next,
+      (draft) => {
+        if (event.kind === 'notification') {
+          new NotificationOnHistoryApplier(draft, options, ownedModel, textAppends).apply([
+            event.value,
+          ]);
+        } else {
+          const applied = applyMessageContentsBatch(draft, [event.value], {
+            ...options,
+            model: ownedModel,
+            textAppends,
+          });
+          for (const [index, entry] of applied.entries()) {
+            const current = draft[index];
+            if (!current || current.id !== entry.id) {
+              draft[index] = entry;
+              continue;
+            }
+            for (const key of new Set([...Object.keys(current), ...Object.keys(entry)])) {
+              if (Reflect.get(current, key) === Reflect.get(entry, key)) continue;
+              if (Object.hasOwn(entry, key)) Reflect.set(current, key, Reflect.get(entry, key));
+              else Reflect.deleteProperty(current, key);
+            }
+          }
+          draft.length = applied.length;
+        }
+      },
+      (recorded) => {
+        patches = recorded;
+      }
+    );
+    for (const patch of patches) {
+      const index = patch.path[0];
+      if (typeof index !== 'number') continue;
+      const entry = next[index];
+      if (entry) changes.push({ turnId: entry.id, path: patch.path.slice(1) });
     }
-  });
-  return { history: next, textAppends };
+  }
+  return { history: next, textAppends, changes };
 }
 
 /**
@@ -2314,6 +2363,8 @@ export function planAgentHistoryMutation(
  * text/thought/plan deltas are flushed first to maintain correct order.
  */
 export type ApplyMessageContentsBatchOptions = {
+  /** Internal planning records; the mutating reader API remains unchanged. */
+  textAppends?: AgentHistoryTextAppend[];
   createId?: () => string;
   now?: () => string;
   targetAssistantEntryId?: string;
@@ -2435,6 +2486,14 @@ export const applyMessageContentsBatch = (
       const text = merged.item.text;
       if (text) {
         state.items[state.items.length - 1] = merged.item;
+        if (merged.suffix !== undefined)
+          options.textAppends?.push({
+            turnId: state.entry.id,
+            itemIndex: state.items.length - 1,
+            previous: existing.text,
+            value: text,
+            text: merged.suffix,
+          });
       } else {
         state.items.pop();
       }

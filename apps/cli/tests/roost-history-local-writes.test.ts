@@ -3,8 +3,13 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Identity } from '@loro-dev/roost';
-import { fromApplicationJson } from '@loro-dev/roost/lody-history';
+import { Identity, decodeJson } from '@loro-dev/roost';
+import {
+  fromApplicationJson,
+  toApplicationJson,
+  applicationJsonText,
+} from '@loro-dev/roost/lody-history';
+import { roostContentPatches, stageRoostContent } from '../src/session/roost-content-patches';
 import { createRoostHistoryReader } from '@lody/shared/session-data';
 import { createRoostReadPort } from '../src/session/roost-history-port';
 import {
@@ -383,4 +388,97 @@ describe('Production Roost compact renderer receipts', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+});
+
+it('stages all content operations exactly like Native, including Unicode and own keys, then reopens', async () => {
+  const { RoostNativeClient } = await import('@loro-dev/roost-node');
+  const directory = await mkdtemp(join(tmpdir(), 'lody-roost-staging-'));
+  const seed = new Uint8Array(32).fill(39),
+    owner = Identity.fromSeed(seed).owner();
+  const options = {
+    dbPath: join(directory, 'history.db'),
+    seed,
+    allowedOwners: [owner],
+    maxQueuedRequests: 16,
+    maxQueuedBytes: 8 * 1024 * 1024,
+  };
+  let client = new RoostNativeClient(options);
+  try {
+    await client.ready;
+    const stream = client.stream('staged-operations');
+    const initial = {
+      items: [{ type: 'text', text: 'a🙂bc🚀d' }],
+      nested: { rows: [1, 2] },
+      remove: true,
+    };
+    const created = await stream.create([], applicationJsonText({ content: initial }));
+    const id = created.updates[0]?.turnId;
+    if (!id) throw new Error('Expected native identity');
+    let before: unknown = initial,
+      sdk: unknown = fromApplicationJson(initial),
+      seq = 1n;
+    const versions: unknown[] = [
+      {
+        items: [
+          { type: 'thought', text: 'a🙂XYZ🚀d' },
+          { type: 'text', text: 'new' },
+        ],
+        nested: { rows: [3] },
+      },
+      JSON.parse(
+        '{"items":[{"type":"text","text":"🙂🚀suffix"}],"nested":{"rows":[]},"__proto__":{"own":true}}'
+      ),
+      ...Array.from({ length: 12 }, (_, i) => ({
+        items: [{ type: 'text', text: ['🙂', 'a🚀', '🚀🙂', ''][i % 4] + 'x'.repeat(i) }],
+        nested: { rows: [i, null, { x: true }] },
+      })),
+    ];
+    for (const after of versions) {
+      const saved = structuredClone(before);
+      const changes = [
+        ...new Set([...Object.keys(before as object), ...Object.keys(after as object)]),
+      ].map((key) => ({ turnId: 'synthetic', path: [key] }));
+      const ops = roostContentPatches(before, after, undefined, changes);
+      const staged = stageRoostContent(before, ops),
+        stagedSdk = stageRoostContent(sdk, ops, undefined, 'sdk');
+      expect(staged).toEqual(after);
+      expect(stageRoostContent(before, roostContentPatches(before, after))).toEqual(staged);
+      expect(before).toEqual(saved);
+      await stream.edit(id, seq, ops);
+      seq += BigInt(ops.length);
+      const read = await stream.readTurn(id);
+      if (read.kind !== 'found') throw new Error('Expected native content');
+      const actual = decodeJson(new TextEncoder().encode(read.turn.contentJson));
+      if (!(actual instanceof Map)) throw new Error('Expected envelope');
+      expect(stagedSdk).toEqual(actual.get('content'));
+      expect(toApplicationJson(actual.get('content') ?? null)).toEqual(after);
+      before = staged;
+      sdk = stagedSdk;
+    }
+    const immutable = structuredClone(before);
+    const bad = [
+      {
+        kind: 'spliceText' as const,
+        path: [{ key: 'content' }, { key: 'items' }, { index: 0n }, { key: 'text' }],
+        index: 99999n,
+        delete: 0n,
+        text: 'bad',
+      },
+    ];
+    expect(stageRoostContent(before, bad)).toBeUndefined();
+    await expect(stream.edit(id, seq, bad)).rejects.toThrow();
+    expect(before).toEqual(immutable);
+    await stream.seal(id, seq);
+    await client.close();
+    client = new RoostNativeClient(options);
+    await client.ready;
+    const reopened = await client.stream('staged-operations').readTurn(id);
+    if (reopened.kind !== 'found') throw new Error('Expected reopened content');
+    expect(JSON.parse(reopened.turn.contentJson).content).toEqual(before);
+    expect(reopened.turn.sealed).not.toBeNull();
+    expect(Object.hasOwn(Object.prototype, 'own')).toBe(false);
+  } finally {
+    await client.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });

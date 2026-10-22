@@ -42,11 +42,19 @@ const streamChunkSuffix = (current: string, incoming: string, tail = current): s
 };
 
 type StreamText = Extract<MessageContent, { type: 'text' | 'thought' }>;
-type TextAnalysis = { source: string; clean: boolean; tags: boolean; tail: string };
+type TextAnalysis = {
+  source: string;
+  clean: boolean;
+  tags: boolean;
+  closes: boolean;
+  tail: string;
+};
 const textAnalysis = new WeakMap<object, TextAnalysis>();
 const textTailLength = Math.max(4096, LODY_INTERNAL_PROMPT_SCAN_TAIL, '<proposed_plan>'.length - 1);
 const containsAssistantTags = (text: string) =>
   text.includes('<thinking>') || text.includes('<proposed_plan>');
+const containsClosingTags = (text: string) =>
+  text.includes('</thinking>') || text.includes('</proposed_plan>');
 const analyzeText = (item: StreamText): TextAnalysis => {
   const key = isDraft(item) ? (original(item) ?? item) : item;
   const cached = textAnalysis.get(key);
@@ -55,6 +63,7 @@ const analyzeText = (item: StreamText): TextAnalysis => {
     source: item.text,
     clean: sanitizeLodyInternalInstructions(item.text) === item.text,
     tags: containsAssistantTags(item.text),
+    closes: containsClosingTags(item.text),
     tail: item.text.slice(-textTailLength),
   };
   textAnalysis.set(key, analysis);
@@ -64,10 +73,13 @@ const analyzeText = (item: StreamText): TextAnalysis => {
 export const mergeHistoryStreamText = (item: StreamText, delta: string) => {
   // Malformed stored fields retain the old reducer's repair/refusal behavior.
   if (typeof item.text !== 'string') {
+    // Runtime history can predate the declared schema. Retain its existing JS
+    // coercion/refusal path rather than silently converting malformed values.
+    const stored = item.text as string;
     const merged =
-      !item.text || delta.startsWith(item.text)
+      !stored || delta.startsWith(stored)
         ? delta
-        : item.text + streamChunkSuffix(item.text, delta);
+        : stored + streamChunkSuffix(stored, delta);
     return { item: { ...item, text: sanitizeLodyInternalInstructions(merged) }, suffix: undefined };
   }
   const prior = analyzeText(item);
@@ -86,12 +98,17 @@ export const mergeHistoryStreamText = (item: StreamText, delta: string) => {
       source: text,
       clean: true,
       tags: prior.tags || containsAssistantTags(boundary),
+      closes: prior.closes || containsClosingTags(boundary),
       tail: boundary.slice(-textTailLength),
     });
   return { item: next, suffix: clean ? suffix : undefined };
 };
 
-export const hasAssistantTextTags = (item: StreamText): boolean => analyzeText(item).tags;
+export const hasAssistantTextTags = (item: StreamText): boolean => {
+  const analysis = analyzeText(item);
+  // Both existing structural parsers require a complete closing delimiter.
+  return analysis.tags && analysis.closes;
+};
 
 /** Validation changes object identity, never the already checked string's bytes. */
 export function inheritHistoryStreamText(input: unknown, parsed: unknown): void {

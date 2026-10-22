@@ -5,6 +5,11 @@ import type { SessionNotification } from '@agentclientprotocol/sdk';
 
 import { applyNotificationOnHistory } from '../src/lib/acp/history';
 import { planAgentHistoryMutation, prepareReplacement } from '@lody/shared';
+import {
+  roostContentPatches,
+  stageRoostContent,
+  coalesceAgentTextAppends,
+} from '../src/session/roost-content-patches';
 
 const makeNotification = (update: SessionNotification['update']): SessionNotification => ({
   sessionId: 'session-1' as SessionId,
@@ -58,9 +63,19 @@ describe('applyNotificationOnHistory', () => {
           const result = planAgentHistoryMutation(planned, [event], undefined, {
             targetAssistantEntryId: 'a',
           });
+          const previous = planned;
           planned = result.history.map(
-            (entry, index) => prepareReplacement(planned[index], entry) as SessionHistoryInput
+            (entry, index) => prepareReplacement(previous[index], entry) as SessionHistoryInput
           );
+          for (const [index, entry] of planned.entries()) {
+            const ops = roostContentPatches(
+              previous[index],
+              entry,
+              coalesceAgentTextAppends(result.textAppends, entry.id),
+              result.changes.filter((change) => change.turnId === entry.id)
+            );
+            expect(stageRoostContent(previous[index], ops)).toEqual(entry);
+          }
           expect(planned).toEqual(baseline);
         }
         expect(initial[0]?.items[1]).toEqual({ type: 'text', text: '' });

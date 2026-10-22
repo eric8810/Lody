@@ -63,14 +63,15 @@ root `corepack pnpm check` and `corepack pnpm format` once before committing, th
 `corepack pnpm run docs check`. Subsequent documentation-only edits need docs and
 format checks, not another complete runtime run.
 
-| Change                                                  | Owning checks                                                                                                                                                 | Additional evidence when relevant                                                                                       |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Text notification semantics / immutable plans           | CLI `acp-apply-notification-on-history.test.ts`                                                                                                               | Split Unicode, prompt markers, thinking/plan tags, snapshot/overlap behavior, malformed stored scalars, caller mutation |
-| Lody commit, projection, receipt or branch behavior     | CLI `roost-session-backend-contract.test.ts`, `roost-history-local-writes.test.ts`, `roost-history-local-branch.test.ts`, `roost-history-local-owner.test.ts` | Retry/lost reply, foreign/pending events, reopen, reader ownership, pagination and retained overlays                    |
-| SDK history/checkpoint/index behavior                   | Roost `ts` type/build; Native `tests/native.test.mjs`; SDK `lody-history.test.mjs` and `node-history-index.test.mjs`                                          | Browser IndexedDB and Native/process paths; copied/altered proof, stale CAS, non-applied derived group                  |
-| Rust storage, events, transaction or signature behavior | Matching Roost Rust integration suites, fmt and clippy; Native integration                                                                                    | Crash/reopen, export identity, partial replica, seal/owner/sequence rules; rebuild addon                                |
-| Packed consumer or release layout                       | Existing Roost consumer/release checks and platform CI                                                                                                        | Installed tarball, optional platform package and supported Node floor                                                   |
-| Performance-sensitive path                              | Owning correctness suites, then one applicable manual benchmark below                                                                                         | Same host, workload, durability, read-consumer behavior and source hashes                                               |
+| Change                                                  | Owning checks                                                                                                                                                 | Additional evidence when relevant                                                                                            |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Text notification semantics / immutable plans           | CLI `acp-apply-notification-on-history.test.ts`                                                                                                               | Split Unicode, prompt markers, thinking/plan tags, snapshot/overlap behavior, malformed stored scalars, caller mutation      |
+| History actions / state projection                      | Shared `session-history-actions.test.ts`; CLI `roost-message-state.test.ts`                                                                                   | Finish/permission semantics, borrowed snapshot ownership, bounded resumed-state programs, Native scalar offsets and own keys |
+| Lody commit, projection, receipt or branch behavior     | CLI `roost-session-backend-contract.test.ts`, `roost-history-local-writes.test.ts`, `roost-history-local-branch.test.ts`, `roost-history-local-owner.test.ts` | Retry/lost reply, foreign/pending events, reopen, reader ownership, pagination and retained overlays                         |
+| SDK history/checkpoint/index behavior                   | Roost `ts` type/build; Native `tests/native.test.mjs`; SDK `lody-history.test.mjs` and `node-history-index.test.mjs`                                          | Browser IndexedDB and Native/process paths; copied/altered proof, stale CAS, non-applied derived group                       |
+| Rust storage, events, transaction or signature behavior | Matching Roost Rust integration suites, fmt and clippy; Native integration                                                                                    | Crash/reopen, export identity, partial replica, seal/owner/sequence rules; rebuild addon                                     |
+| Packed consumer or release layout                       | Existing Roost consumer/release checks and platform CI                                                                                                        | Installed tarball, optional platform package and supported Node floor                                                        |
+| Performance-sensitive path                              | Owning correctness suites, then one applicable manual benchmark below                                                                                         | Same host, workload, durability, read-consumer behavior and source hashes                                                    |
 
 Run the CLI suites from `apps/cli`:
 
@@ -139,6 +140,14 @@ The **growing-reply** case uses `ROUNDS=1`, `CHUNKS=1000`, `CHUNK_BYTES=1024`,
 `TOOL_BYTES=16384` with the same `LONG_BENCH_` prefixes. Use another fresh output
 directory. Start each stage in its own process; the installed Native backend is
 process-wide, so changing its database options within a reused process is invalid.
+Keep coordinator logs and source manifests outside `LONG_BENCH_DIR`: the write
+stage requires an empty data directory and refuses pre-existing files.
+The **mixed/resumed** case sets `LONG_BENCH_MIXED=1`, `ROUNDS=10`, `CHUNKS=100`,
+`CHUNK_BYTES=1024`, `TOOL_BYTES=16384`. It includes a fragmented thinking block,
+Unicode, tool/plan changes, and a durable finish/reopen halfway through each reply.
+The `resume` metric includes that finish/open pair and both persistence barriers;
+chunk latency includes later writes to the resumed state. Its expected business
+content comes from the established mutating reducer, and includes the final plan.
 Use identical deterministic fixtures; do not include fixture generation, builds
 or other tests in the timed interval. Run baseline/candidate in an A–B–B–A order
 when reporting a speed change. Record the shared reducer revision used by Loro.
