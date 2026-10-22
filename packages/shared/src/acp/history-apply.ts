@@ -3,6 +3,8 @@ import { isLodySubagentEvent, type LodySubagentEvent } from 'acp-extension-core'
 import type { SessionHistoryInput, SessionPlanEntry } from '../schema';
 import type { AgentHistoryTargets } from '../history-agent-window';
 import { sanitizeLodyInternalInstructions } from '../goal';
+import { Immer } from 'immer';
+import { mergeHistoryStreamText as mergeStreamText, hasAssistantTextTags, shouldDedupeHistoryChunk as shouldDedupeChunk } from '../history-stream-text';
 
 import { parseCodexTerminalCommand, parseCodexTerminalOutput } from './codex-raw';
 import type { AcpSessionNotification } from './schema';
@@ -787,12 +789,6 @@ const compactAdjacentTextAndThought = (items: MessageContent[]): MessageContent[
   return compacted;
 };
 
-function shouldDedupeChunk(chunk: string): boolean {
-  // Heuristic: only dedupe "substantial" chunks to avoid collapsing legitimate short repeats
-  // (e.g. "yes", "ha", or repeated tokens in intentionally repeated phrases).
-  return chunk.length >= 48 || chunk.includes('\n');
-}
-
 function mergeTerminalOutputSnapshot(current: string, incoming: string): string {
   if (!incoming) return current;
   if (!current) return incoming;
@@ -826,36 +822,12 @@ function mergeTerminalOutputSnapshot(current: string, incoming: string): string 
   return incoming;
 }
 
-const mergeStreamChunk = (current: string, incoming: string): string => {
-  if (!incoming) return current;
-  if (!current) return incoming;
-
-  // Some emitters send snapshots instead of deltas. If `incoming` is a snapshot that already
-  // contains `current`, keep only the snapshot.
-  if (incoming.startsWith(current)) {
-    return incoming;
-  }
-
-  // On reconnect/retry, the same chunk may be re-sent. Avoid duplicating large chunks.
-  if (shouldDedupeChunk(incoming) && current.endsWith(incoming)) {
-    return current;
-  }
-
-  if (!shouldDedupeChunk(incoming)) {
-    return current + incoming;
-  }
-
-  // Best-effort overlap merge to handle partial replays where the boundary is not aligned.
-  const maxWindow = 4096;
-  const minOverlap = 24;
-  const maxOverlap = Math.min(current.length, incoming.length, maxWindow);
-  for (let overlap = maxOverlap; overlap >= minOverlap; overlap--) {
-    if (current.slice(-overlap) === incoming.slice(0, overlap)) {
-      return current + incoming.slice(overlap);
-    }
-  }
-
-  return current + incoming;
+export type AgentHistoryTextAppend = {
+  turnId: string;
+  itemIndex: number;
+  previous: string;
+  value: string;
+  text: string;
 };
 
 const mergeToolCallMessage = (
@@ -1555,7 +1527,8 @@ class NotificationOnHistoryApplier {
   constructor(
     history: SessionHistoryInput[],
     options: ApplyNotificationOnHistoryOptions,
-    private model?: ModelInfo
+    private model?: ModelInfo,
+    private readonly textAppends?: AgentHistoryTextAppend[]
   ) {
     this.history = history;
     this.createId = options.createId ?? defaultCreateId;
@@ -2114,17 +2087,20 @@ class NotificationOnHistoryApplier {
     const last = items[items.length - 1];
     if (last && last.type === kind) {
       const existing = last as Extract<MessageContent, { type: typeof kind }>;
-      const text = sanitizeLodyInternalInstructions(mergeStreamChunk(existing.text, delta));
+      const merged = mergeStreamText(existing, delta);
+      const text = merged.item.text;
       if (!text) {
         items.pop();
         this.touchedAssistantEntryIndices.add(entryIndex);
         this.changed = true;
         return;
       }
-      items[items.length - 1] = {
-        ...existing,
-        text,
-      } as MessageContent;
+      items[items.length - 1] = merged.item;
+      const turnId = this.history[entryIndex]?.id;
+      if (turnId && merged.suffix !== undefined) this.textAppends?.push({
+        turnId, itemIndex: items.length - 1, previous: existing.text,
+        value: text, text: merged.suffix,
+      });
       this.touchedAssistantEntryIndices.add(entryIndex);
       this.changed = true;
       return;
@@ -2251,7 +2227,7 @@ class NotificationOnHistoryApplier {
         }
 
         const text = item.text;
-        if (!text.includes('<thinking>') && !text.includes('<proposed_plan>')) {
+        if (!hasAssistantTextTags(item)) {
           newItems.push(item);
           continue;
         }
@@ -2300,6 +2276,34 @@ export const applyNotificationOnHistoryWithChange = (
   const nextHistory = applier.apply(notifications);
   return { history: nextHistory, changed: applier.hasChanges() };
 };
+
+const mutationImmer = new Immer({ autoFreeze: false, useStrictShallowCopy: true });
+export type AgentHistoryMutationEvent =
+  | { kind: 'notification'; value: AcpSessionNotification }
+  | { kind: 'content'; value: MessageContent };
+
+/** Private-owner planning: shares untouched values; public readers still detach. */
+export function planAgentHistoryMutation(
+  history: SessionHistoryInput[],
+  events: readonly AgentHistoryMutationEvent[],
+  model?: ModelInfo,
+  options: ApplyNotificationOnHistoryOptions = {}
+): { history: SessionHistoryInput[]; textAppends: AgentHistoryTextAppend[] } {
+  const textAppends: AgentHistoryTextAppend[] = [];
+  let next = history;
+  // Preserve the current per-event post-processing and transport order.
+  const ownedEvents = structuredClone(events);
+  const ownedModel = model === undefined ? undefined : structuredClone(model);
+  for (const event of ownedEvents) next = mutationImmer.produce(next, (draft) => {
+    if (event.kind === 'notification') {
+      new NotificationOnHistoryApplier(draft, options, ownedModel, textAppends).apply([event.value]);
+    } else {
+      const applied = applyMessageContentsBatch(draft, [event.value], { ...options, model: ownedModel });
+      draft.splice(0, draft.length, ...applied);
+    }
+  });
+  return { history: next, textAppends };
+}
 
 /**
  * Batch process multiple message contents in O(n) time complexity.
@@ -2427,12 +2431,10 @@ export const applyMessageContentsBatch = (
     const last = state.items[state.items.length - 1];
     if (last && last.type === kind) {
       const existing = last as Extract<MessageContent, { type: typeof kind }>;
-      const text = sanitizeLodyInternalInstructions(mergeStreamChunk(existing.text, delta));
+      const merged = mergeStreamText(existing, delta);
+      const text = merged.item.text;
       if (text) {
-        state.items[state.items.length - 1] = {
-          ...existing,
-          text,
-        } as MessageContent;
+        state.items[state.items.length - 1] = merged.item;
       } else {
         state.items.pop();
       }
@@ -2601,7 +2603,7 @@ export const applyMessageContentsBatch = (
         newItems.push(item);
         continue;
       }
-      if (!item.text.includes('<thinking>') && !item.text.includes('<proposed_plan>')) {
+      if (!hasAssistantTextTags(item)) {
         newItems.push(item);
         continue;
       }

@@ -5,8 +5,9 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { Effect, Semaphore } from 'effect';
 import {
-  applyMessageContentsBatch,
-  applyNotificationOnHistory,
+  planAgentHistoryMutation,
+  type AgentHistoryTextAppend,
+  inheritHistoryStreamText,
   type SessionPlanEntry,
   type SessionHistoryInput,
   captureStoredHistory,
@@ -86,6 +87,7 @@ import {
   roostContentPatches,
   agentReceiptPut,
   stageRoostTextAppends,
+  coalesceAgentTextAppends,
 } from './roost-content-patches';
 import { createRoostMessageState, projectRoostMessageState } from './roost-message-state';
 import { reportRoostHistoryFailure } from './roost-history-diagnostics';
@@ -255,6 +257,8 @@ const createNodeServicesForLease = async (
     lease.owner,
     sessionDoc.sessionId
   );
+  if (typeof historyGeneration.history.advanceActiveBranchDirectory !== 'function')
+    throw new Error('Roost SDK lacks incremental directory support; install a matching SDK build');
   await historyGeneration.resolve();
   let historyHost = historyGeneration.host;
   let roostHistory = historyGeneration.history;
@@ -334,7 +338,8 @@ const createNodeServicesForLease = async (
   };
   const projectMessages = async (
     messages: readonly HistoryProjectedMessage[],
-    decoded: readonly RoostHistorySegment[] = decodeMessages(messages)
+    decoded: readonly RoostHistorySegment[] = decodeMessages(messages),
+    detach = true
   ): Promise<SessionEntry[]> => {
     const projected = projectRoostSegments(decoded) as SessionEntry[];
     const primaryContent = new Map(
@@ -387,7 +392,7 @@ const createNodeServicesForLease = async (
         }
       }
       turn = { ...turn, items };
-      return clone(turn);
+      return detach ? clone(turn) : turn;
     };
     for (let start = 0; start < projected.length; start += 8) {
       result.push(
@@ -765,6 +770,25 @@ const createNodeServicesForLease = async (
   ): Promise<void> => {
     const generation = readGeneration;
     const branch = currentBranch();
+    if (mutation) {
+      const advance = roostHistory.advanceActiveBranchDirectory(branch, mutation, branchPageSize);
+      if (advance) {
+        const { message, retainedFrom, through: _through, ...directoryAdvance } = advance;
+        const segment = adaptRoostProjectedMessage(message);
+        const projected = await projectMessages([message], [segment]);
+        if (projected.length === 1 && generation === readGeneration && currentBranch() === branch) {
+          const dropped = advance.startPosition - loadedStartPosition;
+          installBranchWindow(
+            { ...directoryAdvance, messages: [...branch.messages.slice(retainedFrom), message] },
+            [...entries.slice(dropped), ...projected],
+            [...rows.slice(retainedFrom), segment]
+          );
+          recordChange({ kind: 'structure', from: advance.totalCount - 1, to: advance.totalCount });
+          pendingModelSummary = true;
+          return;
+        }
+      }
+    }
     const known = branch.messages.find((row) =>
       Buffer.from(row.turnId).equals(Buffer.from(turnId))
     );
@@ -1123,11 +1147,15 @@ const createNodeServicesForLease = async (
 
   const { createRoostSessionData } = await import('@lody/shared/session-data');
   syncModelSummary = async () => {
-    const read = latestModelTurnId
-      ? await history.readTurn(latestModelTurnId)
-      : { state: 'missing' as const };
+    const position = latestModelTurnId ? positionById.get(latestModelTurnId) : undefined;
+    const cached = position === undefined ? undefined : entries[position];
+    const read = cached
+      ? { state: 'ready' as const, turn: cached }
+      : latestModelTurnId
+        ? await history.readTurn(latestModelTurnId)
+        : { state: 'missing' as const };
     const turn = read.state === 'ready' ? [read.turn] : [];
-    await sessionDoc.setLastModel(latestSessionModel(turn));
+    await sessionDoc.setLastModel(clone(latestSessionModel(turn)));
   };
   await syncModelSummary();
 
@@ -1395,7 +1423,14 @@ const createNodeServicesForLease = async (
   // affected primary bodies; older hydrated bodies are invalidated on demand.
   const refreshTurnProjections = async (
     changed: readonly string[],
-    staged?: ReadonlyMap<string, { message: HistoryProjectedMessage; row: RoostHistorySegment }>
+    staged?: ReadonlyMap<
+      string,
+      {
+        message: HistoryProjectedMessage;
+        row: RoostHistorySegment;
+        entry?: SessionEntry;
+      }
+    >
   ): Promise<void> => {
     if (!changed.length) return;
     const ids = new Set(changed);
@@ -1424,11 +1459,17 @@ const createNodeServicesForLease = async (
     const decoded = changedMessages.map(
       (message) => staged?.get(bytesHex(message.turnId))?.row ?? adaptRoostProjectedMessage(message)
     );
-    const projected = await projectMessages(changedMessages, decoded);
+    // Keep the existing logical projection (including canonical field order and
+    // overlays), without detaching these already private path copies again.
+    const projected = await projectMessages(changedMessages, decoded, !staged);
     for (const entry of projected) {
       const position = positionById.get(entry.id);
       if (position === undefined) throw new Error('Roost changed history has no position');
-      entries[position] = clone(entry);
+      const physical = changedMessages.find((message) => message.businessId === entry.id);
+      const source = physical ? staged?.get(bytesHex(physical.turnId))?.entry : undefined;
+      for (const [index, item] of (entry.items ?? []).entries())
+        inheritHistoryStreamText(source?.items?.[index], item);
+      entries[position] = staged ? entry : clone(entry);
       directory[position] = createRoostDirectoryRow(loadedStartPosition + position, entry);
     }
     activeBranch = { ...branch, messages };
@@ -1448,7 +1489,8 @@ const createNodeServicesForLease = async (
     before: readonly SessionHistoryInput[],
     next: readonly SessionHistoryInput[],
     operationId: string,
-    extra: readonly HistoryBatchCommand[] = []
+    extra: readonly HistoryBatchCommand[] = [],
+    textAppends?: readonly AgentHistoryTextAppend[]
   ): Promise<boolean> => {
     const oldById = new Map(before.map((entry) => [entry.id, entry]));
     // Preflight every authored change before creating a receipt or editing a turn.
@@ -1510,7 +1552,11 @@ const createNodeServicesForLease = async (
         const content = state
           ? createRoostMessageState(decodedContent(primary), bytesHex(primary.turnId), entry)
           : entry;
-        const ops = roostContentPatches(decodedContent(target), content);
+        const ops = roostContentPatches(
+          decodedContent(target),
+          content,
+          !state && textAppends ? coalesceAgentTextAppends(textAppends, entry.id) : undefined
+        );
         if (ops.length) {
           patchWrites.push({
             kind: 'edit',
@@ -1534,7 +1580,7 @@ const createNodeServicesForLease = async (
       const generation = readGeneration;
       const staged = new Map<
         string,
-        { message: HistoryProjectedMessage; row: RoostHistorySegment }
+        { message: HistoryProjectedMessage; row: RoostHistorySegment; entry?: SessionEntry }
       >();
       for (const write of patchWrites) {
         if (write.kind !== 'edit') break;
@@ -1555,13 +1601,23 @@ const createNodeServicesForLease = async (
           (await readState(message))
         )
           break;
-        const content = stageRoostTextAppends(message.content, write.ops);
-        const decoded = stageRoostTextAppends(row.content, write.ops);
+        const appends = textAppends
+          ? coalesceAgentTextAppends(textAppends, message.businessId)
+          : undefined;
+        const content = stageRoostTextAppends(message.content, write.ops, appends);
+        const decoded = stageRoostTextAppends(row.content, write.ops, appends);
         if (content === undefined || decoded === undefined) break;
         const nextSeq = message.nextSeq + BigInt(write.ops.length);
         staged.set(bytesHex(write.turnId), {
           message: { ...message, content, nextSeq },
           row: { ...row, content: decoded, nextSeq },
+          ...(textAppends
+            ? {
+                entry: prepared.find((entry) => entry.id === message.businessId) as
+                  | SessionEntry
+                  | undefined,
+              }
+            : {}),
         });
       }
       let nextGoal = goalProjection;
@@ -2182,41 +2238,38 @@ const createNodeServicesForLease = async (
             anyChanged = true;
           }
           if (!pending.length) continue;
-          const selected = input.targetAssistantEntryId
-            ? await history.readTurn(input.targetAssistantEntryId)
+          const position = input.targetAssistantEntryId
+            ? positionById.get(input.targetAssistantEntryId)
             : undefined;
+          const cached =
+            position !== undefined
+              ? entries[position]
+              : input.targetAssistantEntryId
+                ? pageEntries.get(input.targetAssistantEntryId)?.turn
+                : undefined;
+          const selected = cached
+            ? { state: 'ready' as const, turn: cached }
+            : input.targetAssistantEntryId
+              ? await history.readTurn(input.targetAssistantEntryId)
+              : undefined;
           const before = input.targetAssistantEntryId
             ? selected?.state === 'ready' && selected.turn.role === 'assistant'
               ? [selected.turn as SessionHistoryInput]
               : []
             : await readAll();
-          let next = clone(before);
-          // Preserve transport order instead of deduplicating identical payloads.
-          for (const event of pending) {
-            if (event.kind === 'notification') {
-              next = applyNotificationOnHistory(next, [event.value], input.model, {
-                ...(input.createId ? { createId: input.createId } : {}),
-                ...(input.now ? { now: input.now } : {}),
-                ...(input.targetAssistantEntryId
-                  ? { targetAssistantEntryId: input.targetAssistantEntryId }
-                  : {}),
-              });
-            } else {
-              next = applyMessageContentsBatch(next, [event.value], {
-                ...(input.createId ? { createId: input.createId } : {}),
-                ...(input.now ? { now: input.now } : {}),
-                ...(input.targetAssistantEntryId
-                  ? { targetAssistantEntryId: input.targetAssistantEntryId }
-                  : {}),
-                ...(input.model ? { model: input.model } : {}),
-              });
-            }
-          }
+          const planned = planAgentHistoryMutation(before, pending, input.model, {
+            ...(input.createId ? { createId: input.createId } : {}),
+            ...(input.now ? { now: input.now } : {}),
+            ...(input.targetAssistantEntryId
+              ? { targetAssistantEntryId: input.targetAssistantEntryId }
+              : {}),
+          });
+          const next = planned.history;
           if (
             next.length === before.length &&
             next.every((entry, index) => entry.id === before[index]?.id)
           ) {
-            await commitTurnChanges(before, next, operationId, receipts);
+            await commitTurnChanges(before, next, operationId, receipts, planned.textAppends);
           } else {
             const all = await readAll();
             const changed = new Map(next.map((entry) => [entry.id, entry]));

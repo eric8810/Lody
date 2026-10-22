@@ -74,6 +74,7 @@ export * from './acp/devin-subagent-task';
 export * from './acp/schema';
 export * from './acp/tool-call-history';
 export * from './acp/history-apply';
+export { inheritHistoryStreamText } from './history-stream-text';
 export * from './acp/history-replay-import';
 export * from './acp/ask-user-question';
 export * from './acp/lody-rate-limit-migration';

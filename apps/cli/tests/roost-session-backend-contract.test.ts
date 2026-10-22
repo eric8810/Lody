@@ -1192,6 +1192,14 @@ describe('Production Roost history semantics', () => {
     expect(await fixture.backend.readTurn('projection-active')).toMatchObject({
       turn: { items: [{ type: 'text', text: 'start🙂' }] },
     });
+    const activeSnapshot = await fixture.backend.readTurn('projection-active');
+    if (activeSnapshot.state !== 'ready') throw new Error('Expected active turn');
+    const activeText = activeSnapshot.turn.items[0];
+    if (activeText?.type !== 'text') throw new Error('Expected active text');
+    activeText.text = 'caller mutation of the active path';
+    expect(await fixture.backend.readTurn('projection-active')).toMatchObject({
+      turn: { items: [{ type: 'text', text: 'start🙂' }] },
+    });
 
     const peer = await nativeFixture(id);
     await peer.backend.applyHistoryAction({

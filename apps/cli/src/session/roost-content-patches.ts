@@ -1,3 +1,4 @@
+import type { AgentHistoryTextAppend } from '@lody/shared';
 import { applicationJsonText, type HistoryIdentity } from '@loro-dev/roost/lody-history';
 import type { ContentOp, IndexPut } from '@loro-dev/roost-node';
 import { encodeRoostContentText } from './roost-history-port';
@@ -44,25 +45,68 @@ export function decodeAgentReceipt(value: Uint8Array): { digest: string } {
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
-/** Stage only appendText against an owned snapshot; Native still validates the edit. */
-export function stageRoostTextAppends<T>(content: T, ops: readonly ContentOp[]): T | undefined {
-  if (
-    !ops.length ||
-    ops.some(
-      (op) =>
-        op.kind !== 'appendText' ||
-        op.path.length < 2 ||
-        !('key' in op.path[0]!) ||
-        op.path[0].key !== 'content'
-    )
-  )
-    return undefined;
-  const next = structuredClone(content);
+type TextAppend = Pick<AgentHistoryTextAppend, 'previous' | 'value' | 'text'>;
+export function coalesceAgentTextAppends(
+  appends: readonly AgentHistoryTextAppend[],
+  turnId: string
+): ReadonlyMap<number, TextAppend> {
+  const result = new Map<number, TextAppend>(),
+    invalid = new Set<number>();
+  for (const append of appends) {
+    if (append.turnId !== turnId || invalid.has(append.itemIndex)) continue;
+    const prior = result.get(append.itemIndex);
+    if (prior && prior.value !== append.previous) {
+      result.delete(append.itemIndex);
+      invalid.add(append.itemIndex);
+      continue;
+    }
+    result.set(
+      append.itemIndex,
+      prior
+        ? { previous: prior.previous, value: append.value, text: prior.text + append.text }
+        : append
+    );
+  }
+  return result;
+}
+const textAppendAt = (path: ContentOp['path'], appends?: ReadonlyMap<number, TextAppend>) => {
+  const field = path[1],
+    index = path[2],
+    leaf = path[3];
+  return path.length === 4 &&
+    field &&
+    'key' in field &&
+    field.key === 'items' &&
+    index &&
+    'index' in index &&
+    leaf &&
+    'key' in leaf &&
+    leaf.key === 'text'
+    ? appends?.get(Number(index.index))
+    : undefined;
+};
+
+/** Private path copies only; these snapshots never escape through public reads. */
+export function stageRoostTextAppends<T>(
+  content: T,
+  ops: readonly ContentOp[],
+  appends?: ReadonlyMap<number, TextAppend>
+): T | undefined {
+  let next: unknown = content;
   for (const op of ops) {
-    if (op.kind !== 'appendText') return undefined;
-    let parent: unknown = next;
-    for (let i = 1; i < op.path.length; i++) {
-      const part = op.path[i]!;
+    const root = op.path[0];
+    if (
+      op.kind !== 'appendText' ||
+      op.path.length < 2 ||
+      !root ||
+      !('key' in root) ||
+      root.key !== 'content'
+    )
+      return undefined;
+    const append = textAppendAt(op.path, appends);
+    const visit = (parent: unknown, depth: number): { value: unknown } | undefined => {
+      const part = op.path[depth];
+      if (!part) return undefined;
       const key = 'key' in part ? part.key : Number(part.index);
       let value: unknown;
       if (parent instanceof Map && 'key' in part && parent.has(key)) value = parent.get(key);
@@ -73,24 +117,47 @@ export function stageRoostTextAppends<T>(content: T, ops: readonly ContentOp[]):
       )
         value = Reflect.get(parent, key);
       else return undefined;
-      if (i === op.path.length - 1) {
+      let changed: unknown;
+      if (depth === op.path.length - 1) {
         if (typeof value !== 'string') return undefined;
-        if (parent instanceof Map) parent.set(key, value + op.text);
-        else
-          Object.defineProperty(parent, key, {
-            value: value + op.text,
-            enumerable: true,
-            configurable: true,
-            writable: true,
-          });
-      } else parent = value;
-    }
+        changed =
+          append && value === append.previous && op.text === append.text
+            ? append.value
+            : value + op.text;
+      } else {
+        const child = visit(value, depth + 1);
+        if (!child) return undefined;
+        changed = child.value;
+      }
+      if (parent instanceof Map) {
+        const copy = new Map(parent);
+        copy.set(key, changed);
+        return { value: copy };
+      }
+      const copy = Array.isArray(parent)
+        ? parent.slice()
+        : { ...(parent as Record<string, unknown>) };
+      Object.defineProperty(copy, key, {
+        value: changed,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+      return { value: copy };
+    };
+    const staged = visit(next, 1);
+    if (!staged) return undefined;
+    next = staged.value;
   }
-  return next;
+  return ops.length ? (next as T) : undefined;
 }
 
 /** Diff validated content, preserving unchanged subtrees and native scalar text offsets. */
-export function roostContentPatches(before: unknown, after: unknown): ContentOp[] {
+export function roostContentPatches(
+  before: unknown,
+  after: unknown,
+  appends?: ReadonlyMap<number, TextAppend>
+): ContentOp[] {
   const ops: ContentOp[] = [];
   const walk = (left: unknown, right: unknown, path: ContentOp['path']) => {
     if (Object.is(left, right)) return;
@@ -99,6 +166,11 @@ export function roostContentPatches(before: unknown, after: unknown): ContentOp[
       return;
     }
     if (typeof left === 'string' && typeof right === 'string') {
+      const append = textAppendAt(path, appends);
+      if (append && left === append.previous && right === append.value) {
+        if (append.text) ops.push({ kind: 'appendText', path, text: append.text });
+        return;
+      }
       if (right.startsWith(left)) {
         ops.push({ kind: 'appendText', path, text: right.slice(left.length) });
         return;

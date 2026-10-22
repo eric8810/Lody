@@ -407,7 +407,13 @@ Content refresh converts changed rows and reuses unchanged snapshots; identity
 index construction needs no body conversion. Patch planning may reuse decoded
 content only for the exact installed physical row. Native authoritative reads,
 generation/cursor checks and checkpoint publication still govern updates and
-recovery. See the [incremental projection investigation](../../../../.agents/notes/proposed/architecture/2026-10-22-roost-owner-incremental-projection.md).
+recovery. Private semantic mutation plans share untouched values and carry text
+append intent into Native. Owned path copies still pass through the same logical
+projection; public reads return detached values. Incremental text analysis retains
+bounded suffix context, and complex tags keep the established full parser.
+Confirmed SDK directory transitions advance local tail membership without reloading
+unchanged rows. Foreign work and uncertain results retain authoritative recovery.
+See the [incremental projection investigation](../../../../.agents/notes/proposed/architecture/2026-10-22-roost-owner-incremental-projection.md).
 
 Latest-turn queries share `readLatestTurn` from session-data. It scans the latest
 40-row page first and reads older pages only when no readable match is present.
@@ -672,6 +678,9 @@ owner RPC, its own (or not-yet-known owners) use the installed local owner, and 
 routing leaves its execution documents' auto-read policy unchanged. Open-ended directory reads clip to the owner count and use at most
 500 rows per RPC, restarting when the durable revision moves. Fork and Edit & Resend
 retain their owner sagas; process-local snapshot/rollback handles do not cross RPC.
+The [Roost validation workflow](../../../../.agents/docs/roost-validation.md) owns
+repeatable dependency preparation, suite selection, fixed performance workloads
+and failure diagnosis across Lody and Roost.
 The production SQLite regressions live in
 [`roost-session-backend-contract.test.ts`](../../tests/roost-session-backend-contract.test.ts).
 The synthetic [history benchmark](../../benchmarks/roost-history.mts) exercises
