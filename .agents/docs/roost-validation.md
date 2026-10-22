@@ -174,6 +174,46 @@ print('Reopen, cross-backend content and SQLite checks passed')
 PY_CHECK
 ```
 
+## Report contract
+
+Every benchmark handoff includes a human-readable report in the owning bilingual
+Agent Note, linked from the PR and this guide. Raw JSON alone is insufficient.
+Use the same rows for baseline, candidate and Loro; show regressions and missing
+measurements alongside improvements. A narrow probe may mark unrelated rows
+`not measured`, but cannot establish overall or long-conversation performance.
+The [completed incremental-mutation report](../notes/proposed/architecture/2026-10-22-roost-end-to-end-incremental-mutations.md#complete-resource-report)
+is the current example, including its measurement gaps and read-path interpretation.
+
+| Dimension                | Required report                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Workload and ownership   | Exact revisions/binaries, host/runtime, durability, warm/cold state, logical messages **and** rounds, body/tool bytes, chunks and sizes, loaded window/cache bounds, trial order/count, consumers and exclusions. A 1 MiB reply and 10,000 historical messages answer different questions.                                                                                                                                                                                                                   |
+| History scaling          | For a claim about long-history structure, cover fixed prefixes of 100, 1,000 and 10,000 messages (or report an explicit supported limit/failure), keeping current-message size and measured operations fixed. Report prefix preparation separately. Growing-history aggregate p95 is not p95 at its final size.                                                                                                                                                                                              |
+| Reply scaling            | Keep historical count fixed and measure growth through at least 64/256/1,024 KiB where supported. Separate primary streaming, thought/tag rewrites, tool insertion/update, plan update and resumed-state append. Mixed-batch timing cannot identify each operation's cost.                                                                                                                                                                                                                                   |
+| Writes                   | Per category: sample count, p50/p95/max for user creation, assistant creation, text/thought append, tool/plan update, finish/seal, resume and the first/subsequent resumed append. Show local acknowledgment, control persistence and visible-consumer latency separately when measured. Pooled user/assistant creation must be labeled pooled.                                                                                                                                                              |
+| Memory growth            | RSS at post-import process start, after backend open, after latest-window hydration, at every reported history/body-size milestone, before full export/validation, after full materialization, and after release where measured. Include JS heap, external and array-buffer samples with phase labels. Show growth from a common opened baseline and an actual trajectory, not only one peak. Label whole-process RSS versus the reporting JS isolate; Native-exclusive memory requires its own measurement. |
+| Reads and delivery       | Fresh-process backend open, time to first/latest readable window, adjacent cursor page, absolute jump to oldest, targeted old-turn lookup, full export and incremental delivery/catch-up. State which operations load intermediate pages/bodies and whether Loro already holds its full document. Distinguish writer-only, observer and end-to-end visible latency.                                                                                                                                          |
+| CPU and storage          | Process CPU and wall time per stage; distinguish chunk-only CPU from total-stage CPU. Empty/final control and history DB bytes, payload bytes, sampled WAL/SHM bytes and growth versus message/body count. For sync tests also show HTTP body bytes, Stream offset advance, network conditions and recovery traffic. Local SQLite tests mark network/sync rows `not measured`.                                                                                                                               |
+| Correctness and coverage | Complete expected output, retry stability, fresh-reader/reopen digests, branch/receipt/proof failures, complete unique paging, SQLite checks, source hashes and restoration. List skips, timeouts, OOM/limits, missing categories and unmatched consumer behavior explicitly.                                                                                                                                                                                                                                |
+
+The summary states which goal improved, which remained unchanged or regressed,
+and which is unproven. Every long-conversation conclusion includes both the
+memory-growth and latency tables and its measured scale. Never substitute a warm
+tail-write result for cold-open, memory or history-scaling evidence.
+
+Memory samples must identify actions performed before sampling. Walking to the
+oldest range can populate a page cache with the entire tested history; that is
+different from retaining only the latest window. JS garbage collection and heap
+reservation make RSS growth insufficient to diagnose a leak. Forced-GC retention
+experiments, if needed, are separate from ordinary latency runs and are labeled.
+Do not add JS heap, external and RSS into a purported total, or treat DB/WAL bytes
+as process memory. A zero sample count means unavailable, not zero cost.
+
+Keep expensive scale experiments manual. Extend the existing harness for missing
+measurements when needed, preserving the same synthetic business content and
+durability; do not turn timing expectations into CI assertions or repeat unrelated
+completed suites. If scale/coverage is incomplete, report that gap rather than
+declaring the performance objective complete.
+
 ## Accept results and diagnose failures
 
 - Require expected full text/tool output, receipt retry stability, exact reopen
@@ -183,8 +223,8 @@ PY_CHECK
   Never open the Rust-owned database using another SQLite library in its process.
   Raw Native probes must use the SDK canonical JSON encoder and explicit queue
   bounds; they localize a cost but omit application receipts/indexes/consumers.
-- Report write/append/finish p50/p95, first/latest/older read, CPU, whole-process
-  RSS, and both history/control database sizes. RSS is not Roost-exclusive memory.
+- Follow the [report contract](#report-contract), including memory trajectories,
+  operation categories, long-history coverage and missing measurements.
   SQLite page bytes, WAL/SHM allocation, serialized content, HTTP bodies and Stream
   offset movement are different metrics; never label one as another.
 - An absent export or unexpected loaded path is setup failure: correct the source

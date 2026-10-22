@@ -613,8 +613,8 @@ hydration. Reverse pages carry their own total count and absolute positions. Cur
 rejection after a branch rewrite is recoverable by refreshing the loaded window;
 it never authorizes switching back to Loro or reading a superseded published suffix.
 
-ACP batch appliers can mutate item arrays. The Roost adapter applies them to a
-detached working copy, preserving the before-image used to decide what to persist.
+ACP batch appliers can mutate item arrays. The Roost adapter plans them on private
+copy-on-write drafts, preserving the before-image used to decide what to persist.
 Content changes refresh only affected primary bodies. Sealed-turn corrections
 use `lody-message-state` version 1 records: field, Unicode-text and array operations
 relative to the exact immutable primary Turn ID. The owner reconstructs logical

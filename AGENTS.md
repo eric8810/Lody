@@ -80,6 +80,8 @@ changes dependencies, native boundaries, consumers or ownership.
 
 ## Contributions and checks
 
+- Roost benchmarks MUST use the [report](.agents/docs/roost-validation.md#report-contract).
+
 - Identify once: Lody team if the user says so or GitHub login is `zxch3n`,
   `Leeeon233`, or `wibus-wee`; otherwise community. Before planning a community
   contribution, read [.github/AGENTS.md](.github/AGENTS.md) for size/assignment rules.
