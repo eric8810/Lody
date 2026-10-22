@@ -402,6 +402,13 @@ Web/iOS clients need no Node addon. The owning machine must be available for RPC
 reads; browser-local IndexedDB replicas and offline sync are separate work.
 Runtime packaging and verification: [native runtime note](../../../../.agents/notes/proposed/architecture/2026-10-09-roost-native-runtime.md).
 
+The owner retains decoded bodies for its installed physical message snapshots.
+Content refresh converts changed rows and reuses unchanged snapshots; identity
+index construction needs no body conversion. Patch planning may reuse decoded
+content only for the exact installed physical row. Native authoritative reads,
+generation/cursor checks and checkpoint publication still govern updates and
+recovery. See the [incremental projection investigation](../../../../.agents/notes/proposed/architecture/2026-10-22-roost-owner-incremental-projection.md).
+
 Latest-turn queries share `readLatestTurn` from session-data. It scans the latest
 40-row page first and reads older pages only when no readable match is present.
 The `accept_input_and_dispatch` activation guard uses this path too: a newly

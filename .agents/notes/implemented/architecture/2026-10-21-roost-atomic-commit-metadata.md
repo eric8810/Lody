@@ -145,3 +145,10 @@ initial SIGBUS run are recorded in Roost #22's owning note.
 After this isolation change, the owning session-backend suite passes all 88 tests
 with both v8 and v9 addons; root formatting passes. Root check remains blocked by
 the existing site-docs pretypecheck failure above.
+
+Correction (2026-10-22): the site-docs error above was caused by applying the
+generic NAPI_RS_NATIVE_LIBRARY_PATH override to the full workspace, so Rolldown
+loaded the Roost binding. It was not established as an independent baseline bug.
+The [owner projection investigation](../../proposed/architecture/2026-10-22-roost-owner-incremental-projection.md)
+records verification without that global override. The unpublished Native API
+and coordinated release requirements remain unchanged.

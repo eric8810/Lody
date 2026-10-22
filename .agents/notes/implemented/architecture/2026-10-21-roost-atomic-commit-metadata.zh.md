@@ -107,3 +107,8 @@ site-docs/fumadocs pretypecheck 错误阻塞，未记为通过。
 首轮 SIGBUS 实验记录在 Roost #22 的 owning note。
 隔离修正后，会话 backend owning suite 在 v8/v9 addon 上均为 88 项通过；root format
 通过。root check 仍被上述既有 site-docs pretypecheck 问题阻塞。
+
+更正（2026-10-22）：上述 site-docs 错误来自为整个 workspace 设置通用的
+NAPI_RS_NATIVE_LIBRARY_PATH，导致 Rolldown 加载了 Roost 二进制，不能认定为独立的
+基线 bug。[owner 投影调查](../../proposed/architecture/2026-10-22-roost-owner-incremental-projection.zh.md)
+记录了清除全局覆盖后的验证。Native 尚未发布的 API 及协调发包要求仍然存在。

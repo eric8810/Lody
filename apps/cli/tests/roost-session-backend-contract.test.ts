@@ -1138,6 +1138,82 @@ describe('Production Roost history semantics', () => {
     }
   });
 
+  it('keeps retained projections isolated and refreshes peer corrections before a local patch', async () => {
+    let fixture = await nativeFixture();
+    const id = fixture.doc.sessionId;
+    const previous = {
+      ...nativeAssistant('projection-old'),
+      finished: true,
+      items: [
+        {
+          type: 'tool_call' as const,
+          toolCallId: 'retained-tool',
+          status: 'completed' as const,
+          rawOutput: { text: 'retained output 🙂'.repeat(128) },
+        },
+      ],
+    };
+    await fixture.backend.appendHistoryTurn(nativeUser('projection-u'));
+    await fixture.backend.appendHistoryTurn(previous);
+    await fixture.backend.appendHistoryTurn(nativeUser('projection-next-u'));
+    await fixture.backend.appendHistoryTurn({
+      ...nativeAssistant('projection-active'),
+      items: [{ type: 'text', text: 'start' }],
+    });
+    const snapshot = await fixture.backend.readHistory();
+    const snapshotCopy = structuredClone(snapshot);
+    const exposed = await fixture.backend.readTurn('projection-old');
+    if (exposed.state !== 'ready') throw new Error('Expected retained turn');
+    const tool = exposed.turn.items[0];
+    if (tool?.type !== 'tool_call') throw new Error('Expected retained tool');
+    tool.rawOutput = { text: 'caller mutation' };
+    const append = (operationId: string, text: string) =>
+      fixture.backend.applyAgentBatch({
+        targetAssistantEntryId: 'projection-active',
+        operationIds: [operationId],
+        notifications: [
+          {
+            sessionId: 'synthetic-acp',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+            },
+          },
+        ],
+      });
+    await append('projection-first', '🙂');
+    await append('projection-first', '🙂');
+    expect(snapshot).toEqual(snapshotCopy);
+    expect(await fixture.backend.readTurn('projection-old')).toEqual({
+      state: 'ready',
+      turn: snapshotCopy[1],
+    });
+    expect(await fixture.backend.readTurn('projection-active')).toMatchObject({
+      turn: { items: [{ type: 'text', text: 'start🙂' }] },
+    });
+
+    const peer = await nativeFixture(id);
+    await peer.backend.applyHistoryAction({
+      kind: 'upsert-turn',
+      turn: {
+        ...previous,
+        items: [...previous.items, { type: 'text', text: 'peer correction 漢字' }],
+      } as never,
+    });
+    await append('projection-second', '漢字');
+    const complete = await fixture.backend.readHistory();
+    expect(complete.map((entry) => entry.id)).toEqual(snapshotCopy.map((entry) => entry.id));
+    expect(complete[1]).toMatchObject({
+      items: [...previous.items, { type: 'text', text: 'peer correction 漢字' }],
+    });
+    expect(complete[3]).toMatchObject({ items: [{ type: 'text', text: 'start🙂漢字' }] });
+    expect(snapshot).toEqual(snapshotCopy);
+    await peer.close();
+    await fixture.close();
+    fixture = await nativeFixture(id);
+    expect(await fixture.backend.readHistory()).toEqual(complete);
+  });
+
   it('transmits native streaming edits without resending an unchanged large tool result', async () => {
     const fixture = await coldHistoryHandlerFixture(1);
     const id = [...fixture.docs.keys()][0]!;

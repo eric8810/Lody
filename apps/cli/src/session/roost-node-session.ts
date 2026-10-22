@@ -499,10 +499,22 @@ const createNodeServicesForLease = async (
     projectedByIdentity.clear();
     for (let index = 0; index < messages.length; index += 1) {
       const message = messages[index]!;
-      const segment = adaptRoostProjectedMessage(message);
-      const key = identityKey(segment);
-      projectedByIdentity.set(key, message);
+      projectedByIdentity.set(identityKey(message), message);
     }
+  };
+
+  const decodedContent = (message: HistoryProjectedMessage): unknown => {
+    const key = identityKey(message);
+    // Only the exact installed physical snapshot shares its validated decoded body.
+    // SDK state records and uncached rows still cross the lossless JSON boundary.
+    if (projectedByIdentity.get(key) === message) {
+      const row = rows.find(
+        (candidate) =>
+          candidate.businessId === message.businessId && candidate.segmentId === message.segmentId
+      );
+      if (row) return row.content;
+    }
+    return toApplicationJson(message.content);
   };
 
   const changeBetween = (
@@ -1357,6 +1369,7 @@ const createNodeServicesForLease = async (
     }
     fullEntriesCache = undefined;
     const branch = currentBranch();
+    const retainedRows = new Map(branch.messages.map((message, index) => [message, rows[index]]));
     const primaryIds = branch.messages
       .filter((row) => row.segmentId === 'primary' && ids.has(row.businessId))
       .map((row) => row.turnId);
@@ -1373,7 +1386,9 @@ const createNodeServicesForLease = async (
       directory[position] = createRoostDirectoryRow(loadedStartPosition + position, entry);
     }
     activeBranch = { ...branch, messages };
-    rows = [...adaptRoostProjectedMessages(messages)];
+    rows = messages.map(
+      (message) => retainedRows.get(message) ?? adaptRoostProjectedMessage(message)
+    );
     rebuildSegmentIndexes(messages);
     readGeneration += 1;
     updateLatestSummaryTargets();
@@ -1444,13 +1459,9 @@ const createNodeServicesForLease = async (
           break;
         }
         const content = state
-          ? createRoostMessageState(
-              toApplicationJson(primary.content),
-              bytesHex(primary.turnId),
-              entry
-            )
+          ? createRoostMessageState(decodedContent(primary), bytesHex(primary.turnId), entry)
           : entry;
-        const ops = roostContentPatches(toApplicationJson(target.content), content);
+        const ops = roostContentPatches(decodedContent(target), content);
         if (ops.length) {
           patchWrites.push({
             kind: 'edit',
