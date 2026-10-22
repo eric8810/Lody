@@ -115,6 +115,7 @@ Replace the filename for the other `.mts` entries and use their documented
 | [`roost-first-input.mts`](../../apps/cli/benchmarks/roost-first-input.mts) | Cold open / first input after 0, 100, 1000 messages; same `BENCH_DIR`, `BENCH_PHASE=prepare` then measure | Roost durable; Loro snapshot restored into memory. File cache may be warm                                                            |
 | [`roost-history.mts`](../../apps/cli/benchmarks/roost-history.mts)         | Windowed reads at 100, 1000, 10000 messages; 4 KiB bodies; `BENCH_STRUCTURAL=1` adds structural work      | Production backends + ConversationView. No renderer transport, IndexedDB or paint                                                    |
 | [`roost-durable.test.ts`](../../apps/cli/benchmarks/roost-durable.test.ts) | Durable growing history and growing reply; explicit write → fresh-process reopen → paging                 | Both sides SQLite WAL/FULL and control persistence after every action; live incremental reader measured separately. No network or UI |
+| [`roost-dispatch.test.ts`](../../apps/cli/benchmarks/roost-dispatch.test.ts) | Fixed 100/1,000/10,000-message prefixes, actual watcher selection, 20 appends and fresh-process verification | Both sides SQLite WAL/FULL plus per-action control persistence; selected boundary excludes ACP execution, transport and renderer |
 
 The durable harness has an explicit opt-in config, excluded from default CI.
 Set an absolute, fresh `BENCH_DIR` outside the source checkout. Use the same
@@ -173,6 +174,43 @@ for path in root.glob('*/*.db'):
 print('Reopen, cross-backend content and SQLite checks passed')
 PY_CHECK
 ```
+
+### Fixed-prefix dispatch
+
+Use the same opt-in config with `LONG_BENCH_DISPATCH=1`. For each backend and
+prefix of 100, 1,000 and 10,000 **logical messages**, run `prepare` in a fresh
+synthetic directory. It imports a completed alternating prefix (half as many
+rounds), appends one pending user and one open assistant, and records initial
+index repair separately. All assistants have 1 KiB text and 16 KiB tool output;
+users have 256 bytes. The measured count initially equals prefix + 2.
+
+```sh
+LONG_BENCH_DISPATCH=1 LONG_BENCH_DIR="$BENCH_DIR/roost-1000" \
+  LONG_BENCH_KIND=roost LONG_BENCH_PREFIX=1000 LONG_BENCH_STAGE=prepare \
+  corepack pnpm exec vitest run --config benchmarks/vitest.durable.config.ts
+```
+
+Close preparation completely. Copy its database directory into a new trial
+directory, then run `measure` followed by `verify`, each in a fresh process with
+the same environment except `LONG_BENCH_DIR` and `LONG_BENCH_STAGE`. Use the same
+prepared Roost seed for baseline/candidate A–B–B–A trials and a Loro seed with
+identical business content. Record the exact overlaid sources and dependency
+paths, and restore any archived research workspace in `finally`.
+
+The measurement invokes the real watcher's history/queue selection 13 times
+(first + 12 warm); agent execution, access checks and steer reconciliation are
+excluded. It then records 20 primary 256-byte notification appends, finish,
+resume, the first resumed append, user/assistant creation, selected old-turn and
+adjacent-page reads. Every mutation includes explicit control persistence, with
+acknowledgment and persistence timings also retained separately. Same-operation
+retry must not duplicate output. Memory samples precede full export and follow
+each phase; full-content verification and a fresh-process digest check run after
+timing. SQLite `quick_check` remains an external, post-close check.
+
+Do not describe this as full agent-response latency, a network test, a growing
+1 MiB reply test, or the cost of a cold OS page cache. The
+[dispatch report](../notes/proposed/architecture/2026-10-22-roost-dispatch-scalar-projection.md#validation-and-limits)
+records results and missing categories.
 
 ## Report contract
 

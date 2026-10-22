@@ -73,6 +73,10 @@ import { decodeBatch, Identity } from '@loro-dev/roost';
 import { RoostNativeClient, RoostHostError } from '@loro-dev/roost-node';
 import { describeRoostHistoryFailure } from '../src/session/roost-history-diagnostics';
 import { RoostHistoryGeneration } from '../src/session/roost-history-generation';
+import { RoostDispatchIndex } from '../src/session/roost-dispatch-index';
+import { dispatchEntry, selectDispatchHistory } from '../src/session/session-dispatch-history';
+import { SessionDispatchWatcher } from '../src/session/session-dispatch-watcher';
+import type { SessionExecutionService } from '../src/session/session-execution-service';
 import { readGoalProjection } from '../src/session/roost-goal-projection';
 import { encodeRoostHistoryChange } from '../src/session/roost-history-change-codec';
 import {
@@ -4372,5 +4376,260 @@ describe('Production Roost planned content operations', () => {
     await fixture.close();
     const reopened = await nativeFixture(sessionId);
     expect(JSON.stringify(await reopened.backend.readTurn(id))).toBe(before);
+  });
+});
+
+describe('Production Roost dispatch projection', () => {
+  it('retries when a foreign writer changes only the selected body during its dispatch observation', async () => {
+    const fixture = await nativeFixture();
+    await fixture.backend.appendHistoryTurn(nativeUser('dispatch-coherent-body'));
+    for (let i = 0; i < 41; i++)
+      await fixture.backend.appendHistoryTurn({
+        ...nativeUser(`coherent-settled-${i}`),
+        status: 'handled',
+        read: true,
+      });
+    const peer = await nativeFixture(fixture.doc.sessionId);
+    const read = NodeLodyHistory.prototype.readProjectedMessagesById;
+    let injected = false;
+    vi.spyOn(NodeLodyHistory.prototype, 'readProjectedMessagesById').mockImplementation(
+      async function (...args) {
+        if (!injected && args[0].some((id) => id !== undefined)) {
+          injected = true;
+          await peer.backend.applyHistoryAction({
+            kind: 'upsert-turn',
+            turn: {
+              ...nativeUser('dispatch-coherent-body'),
+              items: [{ type: 'text', text: 'changed by a foreign writer' }],
+            },
+          });
+        }
+        return read.apply(this, args);
+      }
+    );
+    const selected = await fixture.backend.readDispatchSelection(
+      [],
+      (entries) => entries.find((entry) => entry.id === 'dispatch-coherent-body')?.id
+    );
+    expect(injected).toBe(true);
+    expect(selected.turn).toMatchObject({
+      state: 'ready',
+      turn: {
+        id: 'dispatch-coherent-body',
+        status: 'pending',
+        items: [{ type: 'text', text: 'changed by a foreign writer' }],
+      },
+    });
+    expect(selected.history.map((entry) => entry.id)).toEqual(['dispatch-coherent-body']);
+  });
+
+  it('dispatches an old pending input after reopen without materializing historical pages', async () => {
+    const fixture = await nativeFixture();
+    await fixture.backend.appendHistoryTurn(nativeUser('old-pending-dispatch'));
+    for (let i = 0; i < 44; i++)
+      await fixture.backend.appendHistoryTurn({
+        ...nativeUser(`settled-dispatch-${i}`),
+        status: 'handled',
+        read: true,
+      });
+    await fixture.backend.appendHistoryTurn(nativeUser('new-pending-dispatch'));
+    await fixture.backend.flushLocalWrites();
+    const full = await fixture.backend.readHistory();
+    const id = fixture.doc.sessionId;
+    await fixture.close();
+    const reopened = await nativeFixture(id);
+    await reopened.backend.flushLocalWrites();
+    vi.spyOn(NodeLodyHistory.prototype, 'readActiveBranch').mockRejectedValue(
+      new Error('Full branch read forbidden')
+    );
+    vi.spyOn(NodeLodyHistory.prototype, 'readActiveBranchPage').mockRejectedValue(
+      new Error('Historical page hydration forbidden')
+    );
+    const included = ['settled-dispatch-0'];
+    const selected = await reopened.backend.readDispatchHistory(included);
+    expect(selected).toEqual(selectDispatchHistory(full.map(dispatchEntry), included));
+    selected[0]!.status = 'canceled';
+    expect(await reopened.backend.readDispatchHistory(included)).toEqual(
+      selectDispatchHistory(full.map(dispatchEntry), included)
+    );
+    const watcher = new SessionDispatchWatcher({
+      logger: getDefaultLogger(),
+      machineId: 'test-machine',
+      workspaceId: 'test-workspace',
+      workspaceDocument: { repo: reopened.repo },
+      executionService: {
+        reconcileSteerHistory: async () => {},
+        tryAcquireSessionRewriteConflictLease: () => () => {},
+        isInboxInputCanceled: () => false,
+      } as unknown as SessionExecutionService,
+      userResolver: { resolve: async () => undefined, clear: () => {} },
+      canUseMachine: async () => ({ outcome: 'allowed' }),
+    } as never);
+    const check = (
+      watcher as unknown as {
+        checkHistoryAndQueue(
+          doc: SessionDocument,
+          meta: unknown
+        ): Promise<{ turn: SessionHistoryInput | null }>;
+      }
+    ).checkHistoryAndQueue.bind(watcher);
+    const result = await check(reopened.doc, await reopened.doc.getMetaState());
+    expect(result.turn).toEqual(full.find((entry) => entry.id === 'old-pending-dispatch'));
+    await reopened.backend.applyHistoryAction({
+      kind: 'user-status',
+      turnId: 'old-pending-dispatch',
+      status: 'handled',
+    });
+    expect((await check(reopened.doc, await reopened.doc.getMetaState())).turn?.id).toBe(
+      'new-pending-dispatch'
+    );
+  });
+
+  it('keeps completion evidence exact across finish, reopen and late state updates', async () => {
+    const fixture = await nativeFixture();
+    await fixture.backend.appendHistoryTurn(nativeUser('dispatch-completion-user'));
+    await fixture.backend.openAssistantTurn({
+      turnId: 'dispatch-completion-assistant',
+      userTurnId: 'dispatch-completion-user',
+      timestamp: '2026-10-22T00:00:00.000Z',
+    });
+    await fixture.backend.applyHistoryAction({
+      kind: 'finish-assistant',
+      turnId: 'dispatch-completion-assistant',
+      endedAt: 42,
+    });
+    expect(await fixture.backend.readDispatchHistory([])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'dispatch-completion-assistant',
+          userTurnId: 'dispatch-completion-user',
+          endedAt: 42,
+        }),
+      ])
+    );
+    await fixture.backend.openAssistantTurn({
+      turnId: 'dispatch-completion-assistant',
+      userTurnId: 'dispatch-completion-user',
+      timestamp: '2026-10-22T00:00:00.000Z',
+    });
+    expect(
+      (await fixture.backend.readDispatchHistory([])).some((entry) => entry.role === 'assistant')
+    ).toBe(false);
+    await fixture.backend.applyHistoryAction({
+      kind: 'finish-assistant',
+      turnId: 'dispatch-completion-assistant',
+      endedAt: 84,
+    });
+    expect(await fixture.backend.readDispatchHistory([])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'dispatch-completion-assistant', endedAt: 84 }),
+      ])
+    );
+    await fixture.backend.applyHistoryAction({
+      kind: 'user-status',
+      turnId: 'dispatch-completion-user',
+      status: 'handled',
+    });
+    expect(await fixture.backend.readDispatchHistory([])).toEqual([]);
+    expect(await fixture.backend.readDispatchHistory(['dispatch-completion-user'])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'dispatch-completion-user', status: 'handled' }),
+        expect.objectContaining({ id: 'dispatch-completion-assistant', endedAt: 84 }),
+      ])
+    );
+  });
+
+  it('repairs a missing projection with bounded pages and never revives a removed branch', async () => {
+    const fixture = await nativeFixture();
+    await fixture.backend.appendHistoryTurn(nativeUser('dispatch-removed'));
+    await fixture.backend.appendHistoryTurn(nativeAssistant('dispatch-removed-output'));
+    expect(
+      await fixture.backend.replaceEditableTail({
+        expectedUserTurnId: 'dispatch-removed',
+        expectedForkTurnId: undefined,
+        replacement: nativeUser('dispatch-replacement') as never,
+      })
+    ).toMatchObject({ status: 'accepted' });
+    vi.spyOn(NodeLodyHistory.prototype, 'readActiveBranch').mockRejectedValue(
+      new Error('Full branch read forbidden')
+    );
+    const missing = vi
+      .spyOn(RoostDispatchIndex.prototype, 'checkpoint')
+      .mockResolvedValueOnce(undefined);
+    expect(
+      (await fixture.backend.readDispatchHistory(['dispatch-removed'])).map((entry) => entry.id)
+    ).toEqual(['dispatch-replacement']);
+    missing.mockRestore();
+    expect(await fixture.backend.readTurn('dispatch-removed')).toEqual({ state: 'missing' });
+    expect((await fixture.backend.readDispatchHistory([])).map((entry) => entry.id)).toEqual([
+      'dispatch-replacement',
+    ]);
+  });
+
+  it('rejects stale index publication, refreshes another reader and repairs an interrupted build', async () => {
+    const fixture = await nativeFixture();
+    await fixture.backend.appendHistoryTurn(nativeUser('dispatch-index-fence'));
+    await fixture.backend.flushLocalWrites();
+    const read = RoostDispatchIndex.prototype.read;
+    let owner: RoostDispatchIndex | undefined;
+    const capture = vi.spyOn(RoostDispatchIndex.prototype, 'read').mockImplementation(function (
+      ...args
+    ) {
+      owner = this;
+      return read.apply(this, args);
+    });
+    await fixture.backend.readDispatchHistory([]);
+    capture.mockRestore();
+    if (!owner) throw new Error('Expected dispatch projection owner');
+    const old = owner.current();
+    if (!old) throw new Error('Expected complete dispatch checkpoint');
+    const observer = new RoostDispatchIndex(owner.host);
+    const before = await observer.checkpoint(BigInt(old.header.cursor), old.header.count);
+    if (!before) throw new Error('Expected second dispatch checkpoint');
+    expect((await observer.read(before, []))[0]?.id).toBe('dispatch-index-fence');
+    const stalePlan = await observer.plan(before, BigInt(before.header.cursor) + 1n, 1, [
+      {
+        before: dispatchEntry(nativeUser('dispatch-index-fence')),
+        after: { id: 'dispatch-index-fence', role: 'user', status: 'processing', read: true },
+      },
+    ]);
+    await fixture.backend.applyHistoryAction({
+      kind: 'user-status',
+      turnId: 'dispatch-index-fence',
+      status: 'handled',
+    });
+    await expect(observer.commit(stalePlan)).rejects.toMatchObject({ code: 'stale' });
+    const current = owner.current();
+    if (!current) throw new Error('Expected advanced dispatch checkpoint');
+    const refreshed = await observer.checkpoint(BigInt(current.header.cursor), 1);
+    if (!refreshed) throw new Error('Expected refreshed observer');
+    expect(await observer.read(refreshed, ['dispatch-index-fence'])).toEqual([
+      expect.objectContaining({ id: 'dispatch-index-fence', status: 'handled' }),
+    ]);
+    const stored = await fixture.backend.readHistory();
+    const row = await owner.row('dispatch-index-fence', current);
+    if (!row) throw new Error('Expected persisted dispatch row');
+    await expect(
+      owner.rebuild(
+        BigInt(current.header.cursor),
+        1,
+        (async function* () {
+          yield [row];
+        })(),
+        async () => {
+          throw new Error('Synthetic interrupted projection build');
+        }
+      )
+    ).rejects.toThrow('Synthetic interrupted projection build');
+    expect(await observer.checkpoint(BigInt(current.header.cursor) + 1n, 1)).toBeUndefined();
+    vi.spyOn(NodeLodyHistory.prototype, 'readActiveBranch').mockRejectedValue(
+      new Error('Full branch repair forbidden')
+    );
+    expect(await fixture.backend.readDispatchHistory([])).toEqual([]);
+    expect(await fixture.backend.readDispatchHistory(['dispatch-index-fence'])).toEqual([
+      expect.objectContaining({ id: 'dispatch-index-fence', status: 'handled' }),
+    ]);
+    vi.restoreAllMocks();
+    expect(await fixture.backend.readHistory()).toEqual(stored);
   });
 });

@@ -415,6 +415,15 @@ Confirmed SDK directory transitions advance local tail membership without reload
 unchanged rows. Foreign work and uncertain results retain authoritative recovery.
 See the [incremental projection investigation](../../../../.agents/notes/proposed/architecture/2026-10-22-roost-owner-incremental-projection.md).
 
+Dispatch reads pending identities, requested turns and completion evidence from
+body-free indexes, then hydrates only the selected input. The complete marker
+must match the authoritative Native event cursor and history count; selection
+and body hydration share that observation. Loro captures its shallow directory
+and selected body synchronously. Missing or invalid Native indexes are repaired
+once from bounded coherent pages; valid persisted indexes do not scan old bodies
+on reopen. Explicit replay/export retain full history reads. See the
+[dispatch projection note](../../../../.agents/notes/proposed/architecture/2026-10-22-roost-dispatch-scalar-projection.md).
+
 Latest-turn queries share `readLatestTurn` from session-data. It scans the latest
 40-row page first and reads older pages only when no readable match is present.
 The `accept_input_and_dispatch` activation guard uses this path too: a newly

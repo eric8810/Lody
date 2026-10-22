@@ -10,7 +10,13 @@ import {
   type RestoreActiveBranchInput,
   type HistoryInputIdentity,
 } from '@loro-dev/roost/lody-history';
-import type { RoostNativeClient, RoostNodeStream, Write, IndexPut } from '@loro-dev/roost-node';
+import type {
+  RoostNativeClient,
+  RoostNodeStream,
+  Write,
+  IndexPut,
+  IndexEntry,
+} from '@loro-dev/roost-node';
 import type { SessionHistoryInput } from '@lody/shared';
 import { encodeRoostContent } from './roost-history-port';
 import { AGENT_RECEIPTS_TABLE, agentReceiptKey, decodeAgentReceipt } from './roost-content-patches';
@@ -73,12 +79,16 @@ export class RoostHistoryGeneration {
     receipts: IndexPut[],
     cursor: bigint | undefined,
     changedIds: readonly string[],
-    derivedIndexPuts: IndexPut[] = []
+    derivedIndexPuts: IndexPut[] = [],
+    expectedIndexes: IndexEntry[] = []
   ) {
     return this.history.commitContentBatch(writes, {
       indexPuts: receipts,
       expectedEventCursor: cursor,
-      expectedIndexes: receipts.map(({ table, key }) => ({ table, key, value: null })),
+      expectedIndexes: [
+        ...receipts.map(({ table, key }) => ({ table, key, value: null })),
+        ...expectedIndexes,
+      ],
       commitMetadata: roostCommitMetadata(this.observationScope, changedIds),
       derivedIndexPuts,
     });
