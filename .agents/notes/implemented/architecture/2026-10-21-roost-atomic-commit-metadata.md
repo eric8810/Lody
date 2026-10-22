@@ -133,3 +133,15 @@ and `commit-metadata-v1` used by the parent PR. Those source files are unchanged
 here. Publish the coordinated Native package and update the parent's exact
 dependency/lockfile before merging; candidate-linked tests do not make registry
 CI green.
+
+Long-conversation verification exposed an unsafe measurement pattern: a second
+SQLite library must not open and close a live Native-owned file in the same
+process, because it can release the owner's POSIX locks. The remaining physical
+projection-count assertion now inspects the database in a separate Node process;
+the Native client stays open and the original nonempty/count bounds are retained.
+The manual benchmark uses the same separation. This is test tooling only, with no
+runtime storage or history behavior change. Long-workload results and the discarded
+initial SIGBUS run are recorded in Roost #22's owning note.
+After this isolation change, the owning session-backend suite passes all 88 tests
+with both v8 and v9 addons; root formatting passes. Root check remains blocked by
+the existing site-docs pretypecheck failure above.

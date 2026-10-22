@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { LoroRepo } from 'loro-repo';
 import { LoroDoc } from 'loro-crdt';
 import { Cause, Effect, Exit, Fiber } from 'effect';
@@ -2880,18 +2881,28 @@ describe('Production Roost history semantics', () => {
     } finally {
       await reader.close();
     }
-    const db = new Database(dbPath, { readonly: true });
-    try {
-      const kvRows = `(SELECT roost_spaces.name AS space, key, value
-        FROM roost_kv JOIN roost_spaces ON roost_spaces.id = roost_kv.space_id)`;
-      const projection = db
-        .prepare(`SELECT COUNT(*) AS count FROM ${kvRows} WHERE space LIKE ?`)
-        .get(`%${fixture.doc.sessionId}%:projection`) as { count: number };
-      expect(projection.count).toBeGreaterThan(0);
-      expect(projection.count).toBeLessThan(1000);
-    } finally {
-      db.close();
-    }
+    // A second SQLite library must not open/close the live Native-owned file in
+    // this process: its close() can cancel the other library's POSIX file locks.
+    const projection = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          '--input-type=module',
+          '-e',
+          `import { DatabaseSync } from 'node:sqlite';
+           const db = new DatabaseSync(process.argv[1], { readOnly: true });
+           try {
+             const row = db.prepare('SELECT COUNT(*) AS count FROM roost_kv JOIN roost_spaces ON roost_spaces.id = roost_kv.space_id WHERE name LIKE ?').get('%' + process.argv[2] + '%:projection');
+             process.stdout.write(JSON.stringify(row));
+           } finally { db.close(); }`,
+          dbPath,
+          fixture.doc.sessionId,
+        ],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+      )
+    ) as { count: number };
+    expect(projection.count).toBeGreaterThan(0);
+    expect(projection.count).toBeLessThan(1000);
     const sessionId = fixture.doc.sessionId;
     await fixture.close();
     const reopened = await nativeFixture(sessionId);

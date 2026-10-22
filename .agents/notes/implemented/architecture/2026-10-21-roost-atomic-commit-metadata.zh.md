@@ -99,3 +99,11 @@ site-docs/fumadocs pretypecheck 错误阻塞，未记为通过。
 `annotateCommit`、`commitMetadataAfter`、`expectedIndexes` 和 `commit-metadata-v1`。
 这些生产源码本次未改。合并前须统一发布 Native、更新父 PR 的精确依赖和锁文件；
 候选链接测试通过不代表使用正式注册表包的 CI 已通过。
+
+长会话补验发现测量方式的问题：同进程另一份 SQLite 库不能打开再关闭仍由 Native
+持有的数据库文件，否则可能释放 owner 的 POSIX 锁。剩余的物理投影行数断言现在由
+独立 Node 子进程查询；Native client 保持打开，原非空及数量边界不变。手动 benchmark
+也改为这种分离方式。只改测试工具，不改变运行时存储或历史行为。长负载结果与作废的
+首轮 SIGBUS 实验记录在 Roost #22 的 owning note。
+隔离修正后，会话 backend owning suite 在 v8/v9 addon 上均为 88 项通过；root format
+通过。root check 仍被上述既有 site-docs pretypecheck 问题阻塞。
