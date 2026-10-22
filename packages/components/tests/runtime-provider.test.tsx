@@ -4,11 +4,13 @@ import React, { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { atom, createStore, Provider } from 'jotai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ConvexError } from 'convex/values';
 import {
   createStore as createPlatformStore,
   type MutableStore,
   type PlatformSessionState,
   type PlatformE2eeWorkspaces,
+  type WorkspacesState,
 } from '@lody/platform';
 
 const environment = vi.hoisted(() => ({
@@ -18,6 +20,7 @@ const environment = vi.hoisted(() => ({
   cachedWorkspaceId: null as string | null,
   workspace: { id: 'local:workspace', slug: 'local' } as { id: string; slug: string } | null,
   session: undefined as unknown as MutableStore<PlatformSessionState>,
+  workspaces: undefined as unknown as MutableStore<WorkspacesState>,
 }));
 vi.mock('@/atoms', () => ({
   userAtom: atom({ id: 'local:user' }),
@@ -70,6 +73,7 @@ vi.mock('@lody/platform/react', () => ({
     sync: { mode: environment.mode },
     capabilities: new Set(),
     e2eeWorkspaces: environment.e2eeWorkspaces,
+    workspaces: { state: environment.workspaces },
   }),
 }));
 vi.mock('@/hooks/use-visible-machine-metas', () => ({
@@ -93,6 +97,7 @@ import {
   repairUnreadableE2eeCaches,
   retainWorkspaceModeProof,
   saveE2eeGenesisPin,
+  savePendingE2eeWorkspace,
 } from '../src/lib/e2ee-workspace-storage';
 import {
   runtimeAtom,
@@ -164,6 +169,7 @@ describe('RuntimeProvider warm workspace preparation', () => {
       status: 'authenticated',
       user: { id: 'local:user' },
     });
+    environment.workspaces = createPlatformStore<WorkspacesState>({ status: 'loading' });
     localStorage.clear();
     environment.workspace = { id: 'local:workspace', slug: 'local' };
     store = createStore();
@@ -202,8 +208,358 @@ describe('RuntimeProvider warm workspace preparation', () => {
     store.set(currentWorkspaceIdAtom, 'local:workspace');
   }
 
+  /** The server listing marks the workspace encrypted. Display metadata cannot
+   * prove plaintext, but it is enough to demand authoritative admission. */
+  function listEncrypted(id = 'local:workspace', slug = 'local') {
+    environment.workspaces.set({
+      status: 'ready',
+      activeWorkspaceId: id,
+      workspaces: [{ id, slug, name: slug, role: 'owner', contentMode: 'e2ee' }],
+    });
+  }
+
+  const encryptedDescriptor = (workspaceId: string) =>
+    ({
+      workspaceId,
+      contentMode: 'e2ee',
+      contentModeVersion: 1,
+      genesisHash: '11'.repeat(32),
+      cryptoOrgId: '11'.repeat(32),
+      activation: 'control-only',
+    }) as const;
+
+  it('opens an ordinary workspace before authentication, verifies it in the background and keeps it through auth refresh', async () => {
+    ordinaryCloud();
+    environment.session.set({ status: 'loading' });
+    await render();
+    expect(store.get(runtimeAtom)).toBe(prepared);
+    expect(store.get(workspaceContentModeAtom)).toMatchObject({
+      workspaceSlug: 'local',
+      descriptor: null,
+    });
+    await act(async () =>
+      environment.session.set({ status: 'authenticated', user: { id: 'local:user' } })
+    );
+    expect(store.get(workspaceContentModeAtom)?.descriptor).toMatchObject({
+      contentMode: 'plaintext',
+    });
+    // The verdict is retained for the next offline launch.
+    expect(
+      readWorkspaceModeProof(localStorage, 'local:user', 'local:workspace', 'local')
+    ).toMatchObject({ contentMode: 'plaintext' });
+    await act(async () => environment.session.set({ status: 'loading' }));
+    await act(async () =>
+      environment.session.set({ status: 'authenticated', user: { id: 'local:user' } })
+    );
+    expect(store.get(runtimeAtom)).toBe(prepared);
+    expect(prepared.disposed).toBe(false);
+    expect(createWorkspaceRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens an ordinary workspace offline from its cached ID without a mode proof', async () => {
+    ordinaryCloud();
+    store.set(currentWorkspaceIdAtom, null);
+    environment.e2eeWorkspaces!.describe = () => new Promise(() => {});
+    vi.useFakeTimers();
+    try {
+      await render();
+      expect(store.get(runtimeAtom)).toBe(prepared);
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(store.get(runtimeAtom)).toBe(prepared);
+      expect(store.get(workspaceRuntimeInitFailureAtom)).toBeNull();
+      expect(store.get(workspaceContentModeAtom)).toMatchObject({
+        workspaceId: 'local:workspace',
+        descriptor: null,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retires a provisional runtime when background verification finds an encrypted workspace', async () => {
+    ordinaryCloud();
+    const mode = Promise.withResolvers<ReturnType<typeof encryptedDescriptor>>();
+    environment.e2eeWorkspaces!.describe = () => mode.promise;
+    await render();
+    expect(store.get(runtimeAtom)).toBe(prepared);
+    await act(async () => mode.resolve(encryptedDescriptor('local:workspace')));
+    expect(store.get(runtimeAtom)).toBeNull();
+    expect(prepared.disposed).toBe(true);
+    expect(store.get(workspaceContentModeAtom)?.descriptor).toMatchObject({ contentMode: 'e2ee' });
+    // The learned mode is sticky: a later restart for an unrelated reason
+    // (account token refresh, local-agent setting) never opens plaintext.
+    await render();
+    environment.mode = 'dual';
+    await render();
+    environment.mode = 'cloud';
+    await render();
+    await act(async () => store.set(workspaceModeAdmissionRetryAtom, 1));
+    expect(createWorkspaceRuntime).toHaveBeenCalledTimes(1);
+    expect(store.get(workspaceContentModeAtom)?.descriptor).toMatchObject({ contentMode: 'e2ee' });
+  });
+
+  it.each(['unknown mode', 'other workspace'] as const)(
+    'retires a provisional runtime and fails closed when background verification returns %s',
+    async (answer) => {
+      ordinaryCloud();
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      environment.e2eeWorkspaces!.describe = async () =>
+        answer === 'unknown mode'
+          ? ({
+              workspaceId: 'local:workspace',
+              contentMode: 'future',
+              contentModeVersion: 2,
+            } as never)
+          : encryptedDescriptor('another-workspace');
+      await render();
+      expect(store.get(runtimeAtom)).toBeNull();
+      expect(prepared.disposed).toBe(true);
+      expect(store.get(workspaceContentModeAtom)).toBeNull();
+      expect(store.get(workspaceRuntimeInitFailureAtom)).toMatchObject({
+        workspaceSlug: 'local',
+        modeAdmission: { knownEncrypted: false },
+      });
+      // The rejection is sticky: Retry waits for authoritative admission and
+      // fails closed again instead of reopening a plaintext runtime.
+      await act(async () => store.set(workspaceModeAdmissionRetryAtom, 1));
+      expect(createWorkspaceRuntime).toHaveBeenCalledTimes(1);
+      expect(store.get(runtimeAtom)).toBeNull();
+      expect(store.get(workspaceContentModeAtom)).toBeNull();
+      expect(store.get(workspaceRuntimeInitFailureAtom)).toMatchObject({
+        modeAdmission: { knownEncrypted: false },
+      });
+    }
+  );
+
+  /** Storage refuses writes of one evidence record, as a full quota would. */
+  function refuseWrites(prefix: string) {
+    const setItem = Storage.prototype.setItem;
+    return vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string
+    ) {
+      if (key.startsWith(prefix)) throw new DOMException('Quota exceeded', 'QuotaExceededError');
+      setItem.call(this, key, value);
+    });
+  }
+
+  it('keeps a rejection for the session when storage refuses its marker', async () => {
+    ordinaryCloud();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const refused = refuseWrites('lody-e2ee-rejected-mode:');
+    try {
+      environment.e2eeWorkspaces!.describe = async () =>
+        ({ workspaceId: 'local:workspace', contentMode: 'future', contentModeVersion: 2 }) as never;
+      await render();
+      expect(store.get(runtimeAtom)).toBeNull();
+      expect(
+        localStorage.getItem('lody-e2ee-rejected-mode:local%3Auser:local%3Aworkspace')
+      ).toBeNull();
+      await act(async () => store.set(workspaceModeAdmissionRetryAtom, 1));
+      environment.mode = 'dual';
+      await render();
+      environment.mode = 'cloud';
+      await render();
+      expect(createWorkspaceRuntime).toHaveBeenCalledTimes(1);
+      expect(store.get(runtimeAtom)).toBeNull();
+      expect(store.get(workspaceRuntimeInitFailureAtom)).toMatchObject({ workspaceSlug: 'local' });
+    } finally {
+      refused.mockRestore();
+    }
+  });
+
+  it('fails closed when an encrypted answer cannot be recorded', async () => {
+    ordinaryCloud();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const refused = refuseWrites('lody-e2ee-known-mode:');
+    try {
+      environment.e2eeWorkspaces!.describe = async () => encryptedDescriptor('local:workspace');
+      await render();
+      expect(store.get(runtimeAtom)).toBeNull();
+      expect(prepared.disposed).toBe(true);
+      expect(store.get(workspaceContentModeAtom)).toBeNull();
+      expect(store.get(workspaceRuntimeInitFailureAtom)).toMatchObject({
+        workspaceSlug: 'local',
+        errorType: 'QuotaExceededError',
+      });
+      await act(async () => store.set(workspaceModeAdmissionRetryAtom, 1));
+      expect(createWorkspaceRuntime).toHaveBeenCalledTimes(1);
+      expect(store.get(runtimeAtom)).toBeNull();
+      expect(store.get(workspaceRuntimeInitFailureAtom)).toMatchObject({ workspaceSlug: 'local' });
+    } finally {
+      refused.mockRestore();
+    }
+  });
+
+  it('retires a provisional runtime when the listing later marks the workspace encrypted', async () => {
+    ordinaryCloud();
+    environment.e2eeWorkspaces!.describe = () => new Promise(() => {});
+    await render();
+    expect(store.get(runtimeAtom)).toBe(prepared);
+    await act(async () => listEncrypted());
+    expect(store.get(runtimeAtom)).toBeNull();
+    expect(prepared.disposed).toBe(true);
+    expect(store.get(workspaceContentModeAtom)).toBeNull();
+    expect(createWorkspaceRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['with', 'without'] as const)(
+    'before sign-in, opens provisionally only %s no other account holding encrypted evidence',
+    async (kind) => {
+      ordinaryCloud();
+      store.set(userAtom, null as never);
+      if (kind === 'with')
+        saveE2eeGenesisPin(localStorage, 'other-account', 'local:workspace', '11'.repeat(32));
+      await render();
+      expect(store.get(runtimeAtom)).toBe(kind === 'with' ? null : prepared);
+      expect(createWorkspaceRuntime).toHaveBeenCalledTimes(kind === 'with' ? 0 : 1);
+    }
+  );
+
+  it('keeps an ordinary runtime when background verification fails without describing a mode', async () => {
+    ordinaryCloud();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    environment.e2eeWorkspaces!.describe = async () => {
+      throw new Error('Offline');
+    };
+    await render();
+    expect(store.get(runtimeAtom)).toBe(prepared);
+    expect(prepared.disposed).toBe(false);
+    expect(store.get(workspaceRuntimeInitFailureAtom)).toBeNull();
+  });
+
+  it('retries a mode read rejected while backend authentication catches up', async () => {
+    ordinaryCloud();
+    listEncrypted();
+    let reads = 0;
+    const remote = environment.e2eeWorkspaces!.describe;
+    environment.e2eeWorkspaces!.describe = async (request) => {
+      reads++;
+      if (reads === 1) throw new ConvexError({ kind: 'lody.auth', code: 'unauthenticated' });
+      return remote(request);
+    };
+    vi.useFakeTimers();
+    try {
+      await render();
+      expect(store.get(runtimeAtom)).toBeNull();
+      expect(store.get(workspaceRuntimeInitFailureAtom)).toBeNull();
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      expect(reads).toBe(2);
+      expect(store.get(runtimeAtom)).toBe(prepared);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the verified mode through a same-workspace restart', async () => {
+    ordinaryCloud();
+    listEncrypted();
+    retainWorkspaceModeProof(localStorage, 'local:user', 'local', {
+      workspaceId: 'local:workspace',
+      contentMode: 'plaintext',
+      contentModeVersion: 1,
+    });
+    await render();
+    const replacement = runtimeFixture();
+    vi.mocked(createWorkspaceRuntime).mockResolvedValue(replacement as never);
+    const modes: unknown[] = [];
+    const unsubscribe = store.sub(workspaceContentModeAtom, () =>
+      modes.push(store.get(workspaceContentModeAtom))
+    );
+    await act(async () => store.set(workspaceModeAdmissionRetryAtom, 1));
+    unsubscribe();
+    expect(prepared.disposed).toBe(true);
+    expect(store.get(runtimeAtom)).toBe(replacement);
+    expect(modes).not.toContain(null);
+    expect(store.get(workspaceContentModeAtom)?.descriptor).toMatchObject({
+      contentMode: 'plaintext',
+    });
+  });
+
+  it('accepts a mode proof saved under a previous slug and rewrites it for the current slug', async () => {
+    ordinaryCloud();
+    retainWorkspaceModeProof(localStorage, 'local:user', 'old-slug', {
+      workspaceId: 'local:workspace',
+      contentMode: 'plaintext',
+      contentModeVersion: 1,
+    });
+    environment.e2eeWorkspaces!.describe = () => new Promise(() => {});
+    await render();
+    expect(store.get(runtimeAtom)).toBe(prepared);
+    expect(store.get(workspaceContentModeAtom)?.descriptor).toMatchObject({
+      contentMode: 'plaintext',
+    });
+    expect(
+      readWorkspaceModeProof(localStorage, 'local:user', 'local:workspace', 'local')
+    ).toMatchObject({ contentMode: 'plaintext' });
+  });
+
+  it('retains mode proofs for listed workspaces once signed in, so a later offline open is admitted', async () => {
+    ordinaryCloud();
+    environment.workspaces.set({
+      status: 'ready',
+      activeWorkspaceId: 'local:workspace',
+      workspaces: [
+        { id: 'local:workspace', slug: 'local', name: 'Local', role: 'owner' },
+        { id: 'workspace-beta', slug: 'beta', name: 'Beta', role: 'member' },
+      ],
+    });
+    await render();
+    expect(
+      readWorkspaceModeProof(localStorage, 'local:user', 'workspace-beta', 'beta')
+    ).toMatchObject({ contentMode: 'plaintext' });
+    environment.e2eeWorkspaces!.describe = () => new Promise(() => {});
+    environment.cachedWorkspaceId = 'workspace-beta';
+    await act(async () => {
+      store.set(currentWorkspaceSlugAtom, 'beta');
+      store.set(currentWorkspaceIdAtom, null);
+    });
+    expect(store.get(workspaceContentModeAtom)).toMatchObject({
+      workspaceId: 'workspace-beta',
+      descriptor: { contentMode: 'plaintext' },
+    });
+  });
+
+  it.each(['genesis pin', 'known-mode marker', 'pending creation for the slug'] as const)(
+    'still waits for authoritative admission when a %s exists',
+    async (evidence) => {
+      ordinaryCloud();
+      if (evidence === 'genesis pin')
+        saveE2eeGenesisPin(localStorage, 'local:user', 'local:workspace', '11'.repeat(32));
+      else if (evidence === 'known-mode marker')
+        localStorage.setItem(
+          'lody-e2ee-known-mode:local%3Auser:local%3Aworkspace',
+          '11'.repeat(32)
+        );
+      else
+        savePendingE2eeWorkspace(localStorage, {
+          accountId: 'local:user',
+          requestId: 'request-1',
+          name: 'Local',
+          slug: 'local',
+        });
+      environment.e2eeWorkspaces!.describe = () => new Promise(() => {});
+      vi.useFakeTimers();
+      try {
+        await render();
+        expect(store.get(runtimeAtom)).toBeNull();
+        expect(store.get(workspaceContentModeAtom)).toBeNull();
+        await act(async () => vi.advanceTimersByTimeAsync(15_000));
+        expect(store.get(workspaceRuntimeInitFailureAtom)).toMatchObject({
+          errorType: WorkspaceModeAdmissionTimeoutError.name,
+          modeAdmission: { knownEncrypted: true },
+        });
+        expect(createWorkspaceRuntime).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
   it('waits for the same account to authenticate, then preserves the runtime through auth refresh', async () => {
     ordinaryCloud();
+    listEncrypted();
     environment.session.set({ status: 'loading' });
     await render();
     expect(store.get(runtimeAtom)).toBeNull();
@@ -232,6 +588,7 @@ describe('RuntimeProvider warm workspace preparation', () => {
 
   it('does not admit a cached account using another account authentication', async () => {
     ordinaryCloud();
+    listEncrypted();
     environment.session.set({ status: 'loading' });
     await render();
     await act(async () =>
@@ -312,6 +669,7 @@ describe('RuntimeProvider warm workspace preparation', () => {
     };
     store.set(currentWorkspaceSlugAtom, 'local');
     store.set(currentWorkspaceIdAtom, 'local:workspace');
+    listEncrypted();
     vi.useFakeTimers();
     try {
       await render();
@@ -341,8 +699,9 @@ describe('RuntimeProvider warm workspace preparation', () => {
     }
   });
 
-  it('reports a bounded failure when only an unverified workspace ID cache exists', async () => {
+  it('reports a bounded failure when an encrypted-listed workspace has only an unverified ID cache', async () => {
     ordinaryCloud();
+    listEncrypted();
     environment.cachedWorkspaceId = 'local:workspace';
     store.set(currentWorkspaceIdAtom, null);
     vi.useFakeTimers();
@@ -363,6 +722,7 @@ describe('RuntimeProvider warm workspace preparation', () => {
 
   it('retries timed-out authentication after the same account becomes ready', async () => {
     ordinaryCloud();
+    listEncrypted();
     environment.session.set({ status: 'loading' });
     vi.useFakeTimers();
     try {
@@ -423,6 +783,7 @@ describe('RuntimeProvider warm workspace preparation', () => {
 
   it('cancels an old authentication wait when switching workspace and ignores its later readiness', async () => {
     ordinaryCloud();
+    listEncrypted();
     environment.session.set({ status: 'loading' });
     await render();
     retainWorkspaceModeProof(localStorage, 'local:user', 'next', {
@@ -573,6 +934,7 @@ describe('RuntimeProvider warm workspace preparation', () => {
     };
     store.set(currentWorkspaceSlugAtom, 'encrypted');
     store.set(currentWorkspaceIdAtom, 'workspace-encrypted');
+    listEncrypted('workspace-encrypted', 'encrypted');
     await render();
     expect(store.get(runtimeAtom)).toBeNull();
     expect(store.get(workspaceContentModeAtom)).toBeNull();
@@ -593,7 +955,7 @@ describe('RuntimeProvider warm workspace preparation', () => {
   });
 
   it.each(['unknown', 'unavailable'])(
-    'refuses the plaintext runtime when mode is %s',
+    'refuses the plaintext runtime of an encrypted-listed workspace when mode is %s',
     async (failure) => {
       environment.mode = 'cloud';
       environment.warm = false;
@@ -615,10 +977,13 @@ describe('RuntimeProvider warm workspace preparation', () => {
       };
       store.set(currentWorkspaceSlugAtom, 'encrypted');
       store.set(currentWorkspaceIdAtom, 'workspace-encrypted');
+      listEncrypted('workspace-encrypted', 'encrypted');
+      vi.spyOn(console, 'error').mockImplementation(() => {});
       await render();
       expect(store.get(runtimeAtom)).toBeNull();
       expect(store.get(workspaceRuntimeInitFailureAtom)).toMatchObject({
         workspaceSlug: 'encrypted',
+        modeAdmission: { knownEncrypted: true },
       });
       expect(createWorkspaceRuntime).not.toHaveBeenCalled();
     }
@@ -658,7 +1023,7 @@ describe('RuntimeProvider warm workspace preparation', () => {
     }
   );
 
-  it('reopens an authenticated plaintext mode offline using only its matching account and slug proof', async () => {
+  it('reopens an authenticated plaintext mode offline using only its matching account proof', async () => {
     environment.mode = 'cloud';
     environment.warm = false;
     environment.cachedWorkspaceId = 'local:workspace';
@@ -688,12 +1053,13 @@ describe('RuntimeProvider warm workspace preparation', () => {
     expect(
       readWorkspaceModeProof(localStorage, 'other-user', 'local:workspace', 'local')
     ).toBeNull();
-    expect(
-      readWorkspaceModeProof(localStorage, 'local:user', 'local:workspace', 'other-slug')
-    ).toBeNull();
     await act(async () => store.set(userAtom, { id: 'other-user' } as never));
-    expect(store.get(runtimeAtom)).toBeNull();
     expect(prepared.disposed).toBe(true);
+    // Another account cannot inherit the proof; its runtime is only provisional.
+    expect(store.get(workspaceContentModeAtom)).toMatchObject({
+      accountId: 'other-user',
+      descriptor: null,
+    });
   });
 
   it('blocks an unreadable mode cache, then admits after local repair and an in-place retry', async () => {

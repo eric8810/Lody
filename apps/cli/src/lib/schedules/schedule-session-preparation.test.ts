@@ -49,6 +49,7 @@ const manager = {
   repo: {
     getDocMeta: async () => undefined,
     getWorkspaceMeta: async () => undefined,
+    openFlockDoc: async () => ({ flock: { scan: () => [] } }),
   },
   syncMetaOrThrow: async () => {},
 } as unknown as LoroDocumentManager;
@@ -83,6 +84,7 @@ describe('Session preparation for a scheduled run', () => {
       expect(prepared.meta).not.toHaveProperty(field);
     expect(prepared.meta.machineId).toBe('machine');
     expect(prepared.meta.agentConfigId).toBe('agent');
+    expect(prepared.userTurn.inputConfig?.mcpServerIds).toEqual([]);
   });
 
   it('carries the identifiers the engine froze, so a retry reuses one Session', async () => {

@@ -21,6 +21,8 @@ export {
 } from '../internal/foundation/errors';
 export { decodeCbor, encodeCbor, type CborValue } from '../internal/foundation/cbor';
 export { verifySignature, verifyContentSignature } from '../internal/foundation/signature';
+/** Whether strict Ed25519 verification runs in WebAssembly in this isolate (false: the pure-JS fallback is in use); for host diagnostics. */
+export { ed25519WasmActive } from '../internal/foundation/ed25519-wasm';
 export {
   signVerified,
   nativeDeviceSigner,

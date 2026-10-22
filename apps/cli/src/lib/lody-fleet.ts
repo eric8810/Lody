@@ -26,6 +26,7 @@ import {
   resolveWorkspaceLocalProjectRootPathWithRetry,
   resolveWorkspaceLocalProjectWithSyncOnMiss,
   upsertMachineLocalProject,
+  readLocalProjectRootResolveSyncTimeoutMs,
 } from '@/lib/local-project-meta';
 import { preflightLocalProjectWorktreeRemoval } from '@/lib/local-project-removal';
 import type { LocalSessionControlConfig } from '@/lib/local-session-control';
@@ -1707,7 +1708,7 @@ export class LodyFleet {
         requestSync: () =>
           runtime.lody.documentManager.syncMachineFlockDoc(this.machineId, {
             reason: 'local-project-control-resolve',
-            timeoutMs: readTimeoutEnv('LODY_LOCAL_PROJECT_RESOLVE_SYNC_TIMEOUT_MS', 1_500),
+            timeoutMs: readLocalProjectRootResolveSyncTimeoutMs(),
           }),
       }
     );

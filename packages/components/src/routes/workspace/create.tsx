@@ -192,10 +192,9 @@ function CreateWorkspaceAuthed({
       setEncrypted(Boolean(pending));
     } catch {
       setIntentReadFailed(true);
-      setError(t('e2ee.create.storageFailed'));
     }
     setIntentAccount(accountId);
-  }, [accountId, setWorkspaceSlug, resetWorkspaceSlug, t]);
+  }, [accountId, setWorkspaceSlug, resetWorkspaceSlug]);
   useEffect(() => {
     if (!accountId) return undefined;
     const refresh = (event: StorageEvent) => {
@@ -204,12 +203,15 @@ function CreateWorkspaceAuthed({
         setPendingRequests(listPendingE2eeWorkspaces(localStorage, accountId));
       } catch {
         setIntentReadFailed(true);
-        setError(t('e2ee.create.storageFailed'));
       }
     };
     window.addEventListener('storage', refresh);
     return () => window.removeEventListener('storage', refresh);
-  }, [accountId, t]);
+  }, [accountId]);
+  // Unreadable saved encrypted requests block creation only for a user who has
+  // encrypted creation on. Otherwise they are treated as no saved requests:
+  // regular creation never shows encryption copy or waits on encrypted storage.
+  const intentBlocked = intentReadFailed && creationEnabled;
 
   const hasExistingWorkspaces = Boolean(organizations && organizations.length > 0);
   const paidRequired = creationAvailability?.canCreateFree === false;
@@ -284,7 +286,7 @@ function CreateWorkspaceAuthed({
       !currentPending &&
       pendingRequests.length === 0 &&
       intentAccount === accountId &&
-      !intentReadFailed &&
+      !intentBlocked &&
       !organizationsLoading &&
       organizations &&
       organizations.length > 0
@@ -304,7 +306,7 @@ function CreateWorkspaceAuthed({
         }
       }
     } else if (
-      !intentReadFailed &&
+      !intentBlocked &&
       !currentPending &&
       !organizationsLoading &&
       (!organizations || organizations.length === 0)
@@ -319,7 +321,7 @@ function CreateWorkspaceAuthed({
     pendingRequests.length,
     intentAccount,
     accountId,
-    intentReadFailed,
+    intentBlocked,
     organizations,
     organizationsLoading,
     redirect,
@@ -338,7 +340,7 @@ function CreateWorkspaceAuthed({
     !currentPending &&
     pendingRequests.length === 0 &&
     intentAccount === accountId &&
-    !intentReadFailed &&
+    !intentBlocked &&
     organizations &&
     organizations.length > 0
   ) {
@@ -368,7 +370,7 @@ function CreateWorkspaceAuthed({
       !accountId ||
       submitInFlight.current ||
       creating ||
-      intentReadFailed ||
+      intentBlocked ||
       intentAccount !== accountId
     )
       return;
@@ -539,12 +541,12 @@ function CreateWorkspaceAuthed({
     <CreateWorkspacePage
       workspaceName={workspaceName}
       workspaceSlug={workspaceSlug}
-      error={error}
+      error={error ?? (intentBlocked ? t('e2ee.create.storageFailed') : null)}
       creating={creating}
       fieldsDisabled={Boolean(currentPending)}
       submitDisabled={
         !accountId ||
-        intentReadFailed ||
+        intentBlocked ||
         intentAccount !== accountId ||
         (useEncryption &&
           (!platform.e2eeWorkspaces?.prepareCreation || (paidRequired && !currentPending)))

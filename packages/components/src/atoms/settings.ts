@@ -257,18 +257,6 @@ export const queuedMessageBehaviorAtom = atom(
   }
 );
 
-// Auto-archive a session when its linked PR is merged. Per-user, browser-local.
-export const autoArchiveOnPrMergedAtom = atomWithStorage<boolean>(
-  'lody-auto-archive-on-pr-merged',
-  false
-);
-
-// Auto-archive a session when its linked PR is closed (without merge). Per-user, browser-local.
-export const autoArchiveOnPrClosedAtom = atomWithStorage<boolean>(
-  'lody-auto-archive-on-pr-closed',
-  false
-);
-
 /** localStorage keys for developer-only beta gates — keep in sync with the atoms below. */
 export const DEVELOPER_MODE_STORAGE_KEY = 'lody-developer-mode-enabled';
 export const INBOX_BETA_STORAGE_KEY = 'lody-inbox-beta-enabled';

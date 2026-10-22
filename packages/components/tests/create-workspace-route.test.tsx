@@ -181,4 +181,30 @@ describe('create workspace route with a saved encrypted request', () => {
     expect(input('workspace-name').disabled).toBe(true);
     expect(button('e2ee.create.resume')).toBeDefined();
   });
+
+  it.each([false, true])(
+    'treats an unreadable saved request as none unless encrypted creation is on (%s)',
+    async (enabled) => {
+      fixture.creationEnabled = enabled;
+      localStorage.setItem('lody-e2ee-pending-creation:account:broken', '{broken');
+      await render();
+      expect(container!.textContent?.includes('e2ee.')).toBe(enabled);
+      const type = (id: string, value: string) =>
+        act(async () => {
+          const field = input(id);
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+            field,
+            value
+          );
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      await type('workspace-name', 'Plain');
+      await type('workspace-slug', 'plain');
+      expect(button('organization.createWorkspace')!.disabled).toBe(enabled);
+      if (!enabled) {
+        await click('organization.createWorkspace');
+        expect(fixture.createOrganization).toHaveBeenCalledWith('Plain', 'plain');
+      }
+    }
+  );
 });

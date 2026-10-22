@@ -45,7 +45,7 @@ repository's tests and the Lab, with no compatibility promise.
 | Group | Exports |
 | --- | --- |
 | Bytes and encoding | `Bytes`, `encodeCbor`, `decodeCbor`, `CborValue`, `ValidationError`, `ValidationErrorCode`, `ContentError` |
-| Signatures | `verifySignature`, `verifyContentSignature`, `signVerified`, `nativeDeviceSigner`, `DeviceSigner` |
+| Signatures | `verifySignature`, `verifyContentSignature`, `signVerified`, `nativeDeviceSigner`, `DeviceSigner`, `ed25519WasmActive` |
 | Content format | `encodeDocumentContext`, `encodeContentContext`, `encodeContentHeader`, `contentKeyInfo`, `contentHkdfSalt`, `contentAad`, `contentSigningBytes`, `inspectContentFrame`, `DocumentScope`, `ContentScope`, `ContentPurpose`, `ContentHeader`, `ContentMetadata` |
 | Documents | `sealDocument`, `openDocument`, `authenticateDocument`, `admitDocument`, `deriveDocumentKey`, `scopedDocumentKey`, `importDocumentKey`, `exportDocumentKey`, `disposeDocumentKey`, `DocumentKey` |
 | Content crypto | `deriveContentKey`, `disposeContentKey`, `sealContentAead`, `openContentAead`, `ContentKey`, `SealedContentAead` |
@@ -92,4 +92,12 @@ repository's tests and the Lab, with no compatibility promise.
 
 ## `@lody/e2ee-core/cloudflare`
 
-`ed25519WasmActive`. Import this entry once in a Cloudflare Worker: workerd forbids compiling WebAssembly from bytes at runtime, so the bundler compiles the packaged strict Ed25519 module instead. Without it core still verifies correctly in pure JS, only slower.
+`ed25519WasmActive`. Import this entry once in a Cloudflare Worker: workerd forbids compiling WebAssembly from bytes at runtime, so the bundler compiles the packaged strict Ed25519 module instead. Without it core still verifies correctly in pure JS, only slower. `@lody/e2ee-core/protocol` exports the same `ed25519WasmActive` so hosts that cannot bundle this entry (such as Convex) can report whether WebAssembly is in use; it may instantiate the embedded module on first use, exactly as the first verification would (falling back to pure JS on failure), and never replaces or disables a verification backend.
+
+## `@lody/e2ee-core/adapters/node-custody`
+
+`KekWrapper`, `NodeE2eeCustodyError`, `PreparedNodeE2eeDevice`, `NodeE2eeDevice`,
+`makeNodeE2eeCustody`, `NodeE2eeCustody`, `nodeE2eePorts`.
+
+Node-only custody with an explicit owning Scope. The host qualifies its KEK wrapper;
+file protection admits machine identities only. Personal identities require OS protection.

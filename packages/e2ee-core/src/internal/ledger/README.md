@@ -36,14 +36,20 @@ separate qualification and provenance.
 `exportVerifiedState` and `restoreVerifiedState` let a party resume from **its
 own** earlier verified view. Export returns the canonical state bytes (the
 comparison-note state plus the view's verification origin), position and the
-comparison-note `stateDigest`. Restore only decodes: it checks structure and the
-caller's stored genesis/length/head, but neither signatures, curve points nor the
-digest, because the bytes come from the caller's own storage. The restored view
+comparison-note `stateDigest`. Restore decodes: it checks structure and the
+caller's stored genesis/length/head, but neither signatures nor curve points,
+because the bytes come from the caller's own storage. When the caller also passes
+the stored `stateDigest`, restore recomputes it from the bytes (one SHA-256, no
+second encoding) after they decode and fails with `state-digest-mismatch` on a
+difference; this catches corrupted or mismatched rows, not a writer who can
+replace both. The digest covers position and state but not the trailing
+verification byte. The restored view
 extends exactly like the exported one; the next record must name its head. It
 keeps every device's historical author but reports original epoch publication
 records as unavailable. Never restore another party's bytes;
-that is what endorsed snapshots are for. Retained bytes are current-format only:
-after an encoding change, rebuild them by one full replay.
+that is what endorsed snapshots are for. Retained bytes are current-format only
+(envelope version 2); any other version fails with `unknown-version`, and the
+caller rebuilds them by one full replay.
 
 Preserved candidate v1 arrays/domains: genesis, admit Member, set role, admit own
 device, revoke own device, transfer Owner, publish epoch. Owner/Admin personal
@@ -111,8 +117,9 @@ and [source/destination fingerprints](https://github.com/LodyAI/Lody/blob/5f9759
 
 ## Authenticated permission snapshots
 
-The snapshot functions preserve v1 complete-state
-CBOR and snapshot/v1/head-attest/v1/snapshot-digest/v1 domains. Caller-pinned
+The snapshot functions use snapshot body version 2
+(the compact state; any other version is `unknown-version`) and the snapshot/v1,
+head-attest/v1 and snapshot-digest/v2 domains. Caller-pinned
 external qualification must include genesis, exact head/count, endorser key,
 membership, Owner/Admin role and personal kind. Missing role facts never default
 from signed self-claims or journal data. These are externally confirmed facts; the

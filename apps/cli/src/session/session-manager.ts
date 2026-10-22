@@ -104,8 +104,10 @@ import { getEffectiveMemoryLimitBytes } from '@/utils/memory';
 import { withSlowOperationWarning } from '@/utils/slow-operation-warning';
 import { resolveGitHubRepoWorktreeConfig } from './worktree/worktree-config-resolver';
 import type { AcpCapabilitiesResult } from '@/agent/acp-capability-normalization';
-import { resolveWorkspaceLocalProjectRootPathWithRetry } from '@/lib/local-project-meta';
-import { readTimeoutEnv } from '@/lib/loro/timeout-utils';
+import {
+  resolveWorkspaceLocalProjectRootPathWithRetry,
+  readLocalProjectRootResolveSyncTimeoutMs,
+} from '@/lib/local-project-meta';
 import { loadSessionMcpCatalog } from '@/agent/session-mcp-resolver';
 import {
   claimLegacySpeculativeWorktree,
@@ -1732,7 +1734,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
             requestSync: () =>
               this.workspaceDocument.syncMachineFlockDoc(this.machineId, {
                 reason: 'session-fork-workdir-resolve',
-                timeoutMs: readTimeoutEnv('LODY_LOCAL_PROJECT_RESOLVE_SYNC_TIMEOUT_MS', 1_500),
+                timeoutMs: readLocalProjectRootResolveSyncTimeoutMs(),
               }),
           }
         ),
@@ -1749,7 +1751,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         requestSync: () =>
           this.workspaceDocument.syncMachineFlockDoc(this.machineId, {
             reason: 'session-fork-local-project-resolve',
-            timeoutMs: readTimeoutEnv('LODY_LOCAL_PROJECT_RESOLVE_SYNC_TIMEOUT_MS', 1_500),
+            timeoutMs: readLocalProjectRootResolveSyncTimeoutMs(),
           }),
       }
     );

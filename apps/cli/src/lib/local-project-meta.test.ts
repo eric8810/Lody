@@ -414,4 +414,30 @@ describe('resolveWorkspaceLocalProjectRootPathWithRetry', () => {
     expect(requestSync).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenCalledTimes(2);
   });
+
+  it('gives a row that is still syncing at least 30s by default before failing', async () => {
+    vi.useFakeTimers();
+    try {
+      const flock = new FakeMachineFlock();
+      const { repo } = createRepo(flock);
+      const requestSync = vi.fn(() => new Promise<never>(() => {}));
+      let settled = false;
+      const resolving = resolveWorkspaceLocalProjectRootPathWithRetry(
+        repo,
+        workspaceId,
+        machineId,
+        localProjectId,
+        { requestSync, sleep: instantSleep() }
+      ).finally(() => {
+        settled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await resolving).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

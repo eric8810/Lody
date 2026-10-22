@@ -140,6 +140,7 @@ import {
   resolveActiveAssistantTurnId,
   resolveBaseBranchPreference,
   resolveProjectGitHubRepo,
+  type McpServerId,
 } from '@lody/shared';
 import { useIsMobile } from '../../hooks/use-mobile';
 import { useStableCallback } from '@/hooks/use-stable-callback';
@@ -306,6 +307,7 @@ import { useAppStoreReviewPrompt } from '@/hooks/use-app-store-review-prompt';
 import {
   FloatingPermissionRequest,
   hasPendingPermissionRequest,
+  hasPendingAskUserQuestion,
 } from './floating-permission-request';
 import { SessionPin } from './session-pin';
 import { SessionPinContext, type SessionPinContextValue } from './session-pin-context';
@@ -2329,6 +2331,8 @@ export type DispatchInputBlocksOptions = {
   configOptionValuesOverride?: Record<string, AcpConfigOptionValue>;
   /** Role identity frozen beside this Turn's run config; null is explicit None. */
   agentRole?: SessionTurnAgentRoleSelection;
+  /** The MCP selection captured when the user pressed send. */
+  mcpServerIds?: readonly McpServerId[];
 };
 
 function buildEditedMessageQueueItem(
@@ -2571,10 +2575,11 @@ export const SessionChatInterface = memo(
     // index for counts and timing, and the per-turn fact table for the few
     // readers that need something from anywhere in the conversation.
     const conversationVersion = useConversationVersion(conversationView);
-    const { turns: sessionTailHistory, from: sessionTailFrom } = useConversationTail(
-      conversationView,
-      { extendToLastUserTurn: true }
-    );
+    const {
+      turns: sessionTailHistory,
+      availableTurns: availableSessionTailHistory,
+      from: sessionTailFrom,
+    } = useConversationTail(conversationView, { extendToLastUserTurn: true });
     const conversationConfigSources = useMemo(
       () =>
         conversationView ? collectConversationConfigSources(conversationView, sessionTailFrom) : [],
@@ -3076,6 +3081,7 @@ export const SessionChatInterface = memo(
     const mcpSelection = useSessionMcpSelection(sessionConversationConfig.mcpServerIds, {
       existingSession: true,
       disabled: isArchivedSession,
+      scopeKey: session.id,
     });
     const executionTurnConfigOverrides = useMemo(
       () =>
@@ -4213,21 +4219,32 @@ export const SessionChatInterface = memo(
       user: pendingSender,
       conversationFontSize,
     });
+    // Presence owns liveness; the same pending queue as the composer supplies
+    // the kind of human input. Core metadata works for every ACP provider.
+    const permissionSessionHistory = availableSessionTailHistory as unknown as Parameters<
+      typeof FloatingPermissionRequest
+    >[0]['sessionHistory'];
+    const isAwaitingQuestion = hasPendingAskUserQuestion(
+      liveSessionStatus ?? undefined,
+      permissionSessionHistory
+    );
     const agentActivityLabel =
       initStatusLabel && !isEmptyConversation
         ? initStatusLabel
         : isSessionActive
-          ? liveSessionStatus?.type === 'requestPermission'
-            ? t('sessions.statusIndicator.requestPermission')
-            : isFinalizing
-              ? t('sessions.statusIndicator.finalizing')
-              : runningActivity === 'imageGenerating'
-                ? t('sessions.statusIndicator.imageGenerating')
-                : // Reading, running and editing all read as "Working"; the
-                  // collapsed tool groups above already say which.
-                  runningActivity === 'exploring' || runningActivity === 'writing'
-                  ? t('sessions.working', 'Working')
-                  : t('sessions.statusIndicator.thinking')
+          ? isAwaitingQuestion
+            ? t('sessions.statusIndicator.waitingForAnswer')
+            : liveSessionStatus?.type === 'requestPermission'
+              ? t('sessions.statusIndicator.requestPermission')
+              : isFinalizing
+                ? t('sessions.statusIndicator.finalizing')
+                : runningActivity === 'imageGenerating'
+                  ? t('sessions.statusIndicator.imageGenerating')
+                  : // Reading, running and editing all read as "Working"; the
+                    // collapsed tool groups above already say which.
+                    runningActivity === 'exploring' || runningActivity === 'writing'
+                    ? t('sessions.working', 'Working')
+                    : t('sessions.statusIndicator.thinking')
           : hasPendingDispatch && statusStripState == null
             ? // Pre-start only while the turn can actually start: any
               // connection/machine problem (browser offline, machine removed or
@@ -4237,13 +4254,15 @@ export const SessionChatInterface = memo(
               ? t('sessions.sendStatus.sendingWithoutSize')
               : null;
     const agentActivityTone =
-      isSessionActive && liveSessionStatus?.type === 'requestPermission' ? 'warning' : 'primary';
+      isSessionActive && (isAwaitingQuestion || liveSessionStatus?.type === 'requestPermission')
+        ? 'warning'
+        : 'primary';
     // Waiting on the user is not work in progress: that status does not shimmer.
     const agentActivityShimmer = agentActivityTone !== 'warning';
     // Presence, not the history's `finished` flag: a turn whose daemon died
     // before finalizing stays unfinished forever but is not running.
     const liveTurnActivity: LiveTurnActivity | null = isSessionActive
-      ? liveSessionStatus?.type === 'requestPermission'
+      ? isAwaitingQuestion || liveSessionStatus?.type === 'requestPermission'
         ? 'awaitingUser'
         : 'working'
       : null;
@@ -4282,6 +4301,7 @@ export const SessionChatInterface = memo(
           modelIdOverride?: string | null;
           configOptionValuesOverride?: Record<string, AcpConfigOptionValue>;
           agentRole?: SessionTurnAgentRoleSelection;
+          mcpServerIds?: readonly McpServerId[];
         }
       ): Promise<boolean> => {
         try {
@@ -4303,7 +4323,7 @@ export const SessionChatInterface = memo(
             modelId: turnModelId,
             configOptionValues: turnConfigOptionValues,
             issuePRMentions,
-            mcpServerIds: mcpSelection.selectedIds,
+            mcpServerIds: [...(options?.mcpServerIds ?? mcpSelection.selectedIds)],
             agentRoleId:
               options?.agentRole?.agentRoleId ?? (options?.agentRole === null ? null : undefined),
             agentRoleRevision: options?.agentRole?.agentRoleRevision,
@@ -4440,6 +4460,7 @@ export const SessionChatInterface = memo(
           | 'configOptionValuesOverride'
           | 'agentRole'
           | 'attachments'
+          | 'mcpServerIds'
         >
       ): Promise<boolean> => {
         try {
@@ -4461,7 +4482,7 @@ export const SessionChatInterface = memo(
             modelId: turnModelId,
             configOptionValues: turnConfigOptionValues,
             issuePRMentions,
-            mcpServerIds: mcpSelection.selectedIds,
+            mcpServerIds: [...(options?.mcpServerIds ?? mcpSelection.selectedIds)],
             agentRoleId:
               options?.agentRole?.agentRoleId ?? (options?.agentRole === null ? null : undefined),
             agentRoleRevision: options?.agentRole?.agentRoleRevision,
@@ -4481,7 +4502,7 @@ export const SessionChatInterface = memo(
             modelId: inputConfig.modelId ?? undefined,
             configOptionValues: inputConfig.configOptionValues ?? undefined,
             issuePRMentions: inputConfig.issuePRMentions ?? undefined,
-            mcpServerIds: [...mcpSelection.selectedIds],
+            mcpServerIds: [...(options?.mcpServerIds ?? mcpSelection.selectedIds)],
             agentRoleId: inputConfig.agentRoleId,
             agentRoleRevision: inputConfig.agentRoleRevision,
             memory: inputConfig.memory,
@@ -4552,6 +4573,7 @@ export const SessionChatInterface = memo(
           | 'configOptionValuesOverride'
           | 'agentRole'
           | 'attachments'
+          | 'mcpServerIds'
         >
       ): Promise<boolean> => {
         const turnConfigOptionValues = options?.configOptionValuesOverride ?? configOptionValues;
@@ -4563,6 +4585,7 @@ export const SessionChatInterface = memo(
           configOptionValuesOverride: turnConfigOptionValues,
           agentRole: options?.agentRole,
           attachments: options?.attachments,
+          mcpServerIds: options?.mcpServerIds,
         });
       },
       [configOptionValues, enqueueInputBlocks]
@@ -4632,6 +4655,7 @@ export const SessionChatInterface = memo(
             configOptionValuesOverride: turnConfigOptionValues,
             agentRole: options?.agentRole,
             attachments: options?.attachments,
+            mcpServerIds: options?.mcpServerIds,
           });
           captureSessionEvent(
             accepted ? 'session/message_queued' : 'session/message_submit_failed',
@@ -4654,6 +4678,7 @@ export const SessionChatInterface = memo(
             configOptionValuesOverride: turnConfigOptionValues,
             agentRole: options?.agentRole,
             attachments: options?.attachments,
+            mcpServerIds: options?.mcpServerIds,
           });
           captureSessionEvent(
             accepted ? 'session/message_guide_requested' : 'session/message_submit_failed',
@@ -4684,6 +4709,7 @@ export const SessionChatInterface = memo(
           configOptionValuesOverride: turnConfigOptionValues,
           agentRole: options?.agentRole,
           attachments: options?.attachments,
+          mcpServerIds: options?.mcpServerIds,
         });
         // A held send (attachments still preparing) dispatches itself later;
         // the composer is free again now.
@@ -6453,10 +6479,6 @@ export const SessionChatInterface = memo(
 
     const headerGitHubActions = headerActionsSlot !== undefined ? headerActionsSlot : prBadge;
 
-    // Pending permission requests live in the active (latest) assistant turn.
-    const permissionSessionHistory = sessionHistory as unknown as Parameters<
-      typeof FloatingPermissionRequest
-    >[0]['sessionHistory'];
     const shouldReplaceComposerWithPermission = hasPendingPermissionRequest(
       liveSessionStatus ?? undefined,
       permissionSessionHistory

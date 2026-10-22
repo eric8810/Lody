@@ -1,16 +1,11 @@
-import { createFileRoute, Outlet } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
+import { AuthenticatedWorkspaceContent } from '@/components/authenticated-workspace-content';
 import { BootNavigate } from '@/components/boot-navigate';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useOrganization } from '@/hooks/useOrganization';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { runtimeInitializingAtom, userAtom } from '@/atoms';
-import { WorkspaceCheckoutPendingDialog } from '@/components/workspace-checkout-pending-dialog';
-import { ElectronSessionCompletionNotifier } from '@/components/electron-session-completion-notifier';
-import { ElectronMenuHandler } from '@/components/electron-menu-handler';
-import { AppCommands } from '@/components/app-commands';
-import { CommandPalette } from '@/components/commands/command-palette';
-import { AutoArchivePrWatcher } from '@/components/auto-archive-pr-watcher';
 import { useStableSession } from '@/hooks/useStableSession';
 import { useOnlineMachineIds } from '@/hooks/use-machine-online-status';
 import { usePostHog } from '@posthog/react';
@@ -474,23 +469,5 @@ function AuthedLayoutRoutes({
     <PreloadedMainLayout>
       <AuthenticatedWorkspaceContent showWorkspaceCheckout />
     </PreloadedMainLayout>
-  );
-}
-
-function AuthenticatedWorkspaceContent({
-  showWorkspaceCheckout = false,
-}: {
-  showWorkspaceCheckout?: boolean;
-}) {
-  return (
-    <>
-      <Outlet />
-      <ElectronSessionCompletionNotifier />
-      <ElectronMenuHandler />
-      <AppCommands />
-      <CommandPalette />
-      <AutoArchivePrWatcher />
-      {showWorkspaceCheckout && <WorkspaceCheckoutPendingDialog />}
-    </>
   );
 }

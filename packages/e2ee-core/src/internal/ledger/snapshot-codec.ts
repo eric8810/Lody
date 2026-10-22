@@ -28,6 +28,24 @@ import {
 const domain = (name: string) => new TextEncoder().encode(`lody-e2ee/${name}\0`);
 const lift = <A>(r: Result.Result<A, { readonly code: LedgerError['code'] }>) =>
   Result.mapError(r, (e) => new LedgerError({ code: e.code }));
+/**
+ * Format versions of the compact authorization-state encoding `S`. Current-only:
+ * decoders reject every other version as `unknown-version`. Version 1 bytes were
+ * written with the pre-compact layout, so the compact layout is version 2.
+ */
+const SNAPSHOT_BODY_VERSION = 2;
+/** Retained envelope version; the digest body shares it so the digest is derivable from retained bytes. */
+const RETAINED_VERSION = 2;
+const DIGEST_DOMAIN = 'snapshot-digest/v2';
+const digestOfBody = (body: Uint8Array) =>
+  lift(Bytes.recordHash(sha256(concat([domain(DIGEST_DOMAIN), body]))));
+/**
+ * Deterministic CBOR: the digest body `[2, genesis, length, head, S]` is the
+ * retained array `[2, genesis, length, head, S, verification]` with a 5-element
+ * head and without its last one-byte element, so the digest needs no second encoding.
+ */
+const retainedDigest = (bytes: Uint8Array) =>
+  digestOfBody(concat([Uint8Array.of(0x85), bytes.subarray(1, bytes.length - 1)]));
 const array = (v: CborValue | undefined): Result.Result<readonly CborValue[], LedgerError> =>
   Array.isArray(v) ? Result.succeed(v) : fail('canonical');
 const uint = (v: CborValue | undefined): Result.Result<number, LedgerError> =>
@@ -214,7 +232,7 @@ export function proposalOf(
     const head = hashAt(s, s.hashes.length - 1)!;
     const bodyBytes = yield* lift(
       encodeSnapshotCbor([
-        1,
+        SNAPSHOT_BODY_VERSION,
         s.genesis.toBytes(),
         s.hashesOffset + s.hashes.length,
         head.toBytes(),
@@ -235,14 +253,14 @@ export function stateDigestOf(s: InternalState): Result.Result<Bytes.RecordHash,
     const head = hashAt(s, s.hashes.length - 1)!;
     const body = yield* lift(
       encodeSnapshotCbor([
-        1,
+        RETAINED_VERSION,
         s.genesis.toBytes(),
         s.hashesOffset + s.hashes.length,
         head.toBytes(),
         authState(s),
       ])
     );
-    return yield* lift(Bytes.recordHash(sha256(concat([domain('snapshot-digest/v1'), body]))));
+    return yield* digestOfBody(body);
   });
 }
 export function noteOf(
@@ -284,7 +302,7 @@ export function encodeRetainedState(
     const head = hashAt(s, s.hashes.length - 1)!;
     const bytes = yield* lift(
       encodeRetainedCbor([
-        1,
+        RETAINED_VERSION,
         s.genesis.toBytes(),
         s.hashesOffset + s.hashes.length,
         head.toBytes(),
@@ -292,22 +310,21 @@ export function encodeRetainedState(
         verifications.indexOf(s.verification),
       ])
     );
-    // Deterministic CBOR: the comparison-note body is this array without its
-    // last one-byte element, so the digest needs no second encoding.
-    const body = concat([Uint8Array.of(0x85), bytes.subarray(1, bytes.length - 1)]);
-    const stateDigest = yield* lift(
-      Bytes.recordHash(sha256(concat([domain('snapshot-digest/v1'), body])))
-    );
-    return { bytes, stateDigest };
+    return { bytes, stateDigest: yield* retainedDigest(bytes) };
   });
 }
-/** Decode only: no signature or digest check. The caller vouches that these are its own exported bytes. */
+/**
+ * Decode only: no signature check. The caller vouches that these are its own
+ * exported bytes. A supplied `stateDigest` is recomputed from the bytes after
+ * they decode (so an older version still reports `unknown-version`) and must match.
+ */
 export function decodeRetainedState(
   bytes: Uint8Array,
   expected: {
     readonly genesis: Bytes.GenesisHash;
     readonly head: Bytes.RecordHash;
     readonly length: number;
+    readonly stateDigest?: Bytes.RecordHash | undefined;
   }
 ): Result.Result<InternalState, LedgerError> {
   return safely(() =>
@@ -318,7 +335,7 @@ export function decodeRetainedState(
       if (!Number.isSafeInteger(length) || length < 1) return yield* fail('checkpoint-mismatch');
       const root = yield* array(yield* lift(decodeRetainedCbor(bytes)));
       if (root.length !== 6) return yield* fail('canonical');
-      if ((yield* uint(root[0])) !== 1) return yield* fail('unknown-version');
+      if ((yield* uint(root[0])) !== RETAINED_VERSION) return yield* fail('unknown-version');
       if (!bytesEqual(yield* exact(root[1], 32), genesis.toBytes()))
         return yield* fail('wrong-anchor');
       if (
@@ -328,13 +345,19 @@ export function decodeRetainedState(
         return yield* fail('checkpoint-mismatch');
       const verification = verifications[yield* uint(root[5])];
       if (!verification) return yield* fail('canonical');
-      return yield* decodeAuthState(root[4], {
+      const state = yield* decodeAuthState(root[4], {
         genesis,
         length,
         head,
         verification,
         retained: true,
       });
+      if (expected.stateDigest) {
+        const stored = yield* lift(Bytes.recordHash(expected.stateDigest.toBytes()));
+        if (!stored.equals(yield* retainedDigest(bytes)))
+          return yield* fail('state-digest-mismatch');
+      }
+      return state;
     })
   );
 }
@@ -532,7 +555,7 @@ function claimedSnapshotState(
     if (root.length !== 2) return yield* fail('canonical');
     const body = yield* array(root[0]);
     if (body.length !== 6) return yield* fail('canonical');
-    if ((yield* uint(body[0])) !== 1) return yield* fail('unknown-version');
+    if ((yield* uint(body[0])) !== SNAPSHOT_BODY_VERSION) return yield* fail('unknown-version');
     if (!bytesEqual(yield* exact(body[1], 32), genesis.toBytes()))
       return yield* fail('wrong-anchor');
     if (

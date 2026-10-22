@@ -80,6 +80,7 @@ Parent AGENTS apply. Edit `AGENTS.md`, not its `CLAUDE.md` symlink. Background: 
   preserve snapshot identity across mounts.
 - Role/MCP catalog `upsert`/`remove` resolve on DURABILITY; upload runs independently
   and no surface waits for or reports it.
+- MCP: [rules](../../../../specs/project-default-mcp.md).
 - Role filtering uses shared `listAccessibleAgentRoles` / `resolveAgentRoleAvailability`,
   never local predicates. Availability stays `unknown` until bound machine configs load;
   subscribe exactly those machines. Settings rows describe their own binding;

@@ -566,7 +566,13 @@ export const runtimeAtom = atom<WorkspaceRuntime | null>(null);
  * Why the last attempt to create a runtime rejected, kept until the next
  * attempt. Only the error name is kept: a message can carry stream URLs.
  */
-export type WorkspaceRuntimeInitFailure = { workspaceSlug: string; errorType: string };
+export type WorkspaceRuntimeInitFailure = {
+  workspaceSlug: string;
+  errorType: string;
+  /** Present only when content-mode admission failed. Encryption wording is shown
+   * only when the workspace is known to be encrypted or encrypted creation is on. */
+  modeAdmission?: { knownEncrypted: boolean };
+};
 
 export const workspaceRuntimeInitFailureAtom = atom<WorkspaceRuntimeInitFailure | null>(null);
 

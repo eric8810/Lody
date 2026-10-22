@@ -67,7 +67,6 @@ import {
 } from '@/lib/posthog-analytics';
 import { identifyPostHogUser } from '@/lib/posthog-identity';
 import { cn } from '@/lib/utils';
-import lodyLogo from '@/assets/lody-icon.png';
 
 const LEGAL_LINK_FALLBACK_ORIGIN = 'https://lody.ai';
 const ELECTRON_OAUTH_DEBUG_PREFIX = '[electron-oauth-debug]';
@@ -1894,10 +1893,6 @@ export function LoginPage({
         variants={ENTRANCE_STAGGER}
         {...stylex.props(styles.panel)}
       >
-        <motion.div variants={ENTRANCE_ITEM} {...stylex.props(styles.brand)}>
-          <img src={lodyLogo} alt="Lody" draggable={false} {...stylex.props(styles.brandMark)} />
-        </motion.div>
-
         <motion.div variants={ENTRANCE_ITEM} {...stylex.props(styles.body)}>
           <div {...stylex.props(styles.scene)}>
             <div {...stylex.props(styles.header)}>
@@ -2058,15 +2053,11 @@ const styles = stylex.create({
     letterSpacing: '-0.01em',
     color: colors.label,
   },
-  // Anchored top and bottom: the mark meets the visual's top edge, the sign-in
-  // group sits on the same baseline as the tagline. Stacked, the mark sits under
-  // the visual and the group stays at the bottom, within reach of a thumb.
+  // Keep the sign-in group at the bottom, within reach of a thumb when stacked.
   panel: {
     boxSizing: 'border-box',
     display: 'flex',
     flexDirection: 'column',
-    justifyContent: 'space-between',
-    gap: { default: '32px', [NARROW]: '24px' },
     // Its own row when stacked, so a hidden visual leaves it the full height.
     gridRow: { default: 'auto', [NARROW]: '2' },
     minHeight: 0,
@@ -2076,16 +2067,8 @@ const styles = stylex.create({
     paddingInlineStart: { default: '52px', [NARROW]: '20px' },
     paddingInlineEnd: { default: '40px', [NARROW]: '20px' },
   },
-  brand: {
-    display: 'flex',
-    alignItems: 'center',
-  },
-  brandMark: {
-    width: '28px',
-    height: '28px',
-    objectFit: 'contain',
-  },
   body: {
+    marginTop: 'auto',
     width: '100%',
     maxWidth: { default: '360px', [NARROW]: 'none' },
   },

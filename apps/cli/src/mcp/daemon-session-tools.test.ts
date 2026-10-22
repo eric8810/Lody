@@ -18,11 +18,13 @@ import {
   listWorkspaceAgentRoles,
   readWorkspaceFlockRowsFromFlock,
   readMachineFlockRowsFromFlock,
+  SessionStatusFactory,
   writeWorkspaceAgentRoleToFlock,
   type AgentConfigId,
   type AgentRoleId,
   type MachineId,
   type SessionId,
+  type SessionMeta,
   type WorkspaceId,
 } from '@lody/shared';
 import { bindTestPresenceApplication } from '../../tests/presence-application-fixture';
@@ -253,6 +255,112 @@ describe('daemon-hosted Session tools in the cloud composition', () => {
       ]);
     });
   });
+
+  it.each(['local', 'cloud'] as const)(
+    'archives only contained Tabs through the %s daemon MCP entrypoint',
+    async (composition) => {
+      const root = {
+        ...(await manager.repo.getDocMeta(getSessionRoomId(sessionId)))?.meta,
+        id: sessionId,
+        isArchived: false,
+        status: SessionStatusFactory.running(),
+      } as SessionMeta;
+      const tab = { ...root, id: 'archive-tab' as SessionId, parentSessionId: sessionId };
+      const opened = {
+        ...root,
+        id: 'archive-opened' as SessionId,
+        openedBySessionId: sessionId,
+      };
+      const openedByTab = {
+        ...opened,
+        id: 'archive-opened-by-tab' as SessionId,
+        openedBySessionId: tab.id,
+        openedByRootSessionId: sessionId,
+      };
+      const independentTab = {
+        ...root,
+        id: 'archive-independent-tab' as SessionId,
+        parentSessionId: openedByTab.id,
+      };
+      const independentSessions = [opened, openedByTab, independentTab];
+      const sessions = [root, tab, ...independentSessions];
+      for (const session of sessions)
+        await manager.repo.upsertDocMeta(getSessionRoomId(session.id), session);
+
+      const environment = createLocalSessionCommandEnvironment({
+        manager,
+        workspaceId,
+        machineId,
+        machineName: 'Daemon',
+        userId: ownerUserId,
+        host: {
+          readInvocation: (id) => ({
+            type: 'session/active-invocation-context',
+            active: true,
+            sessionId: id,
+            requesterUserId: ownerUserId,
+            sourceTurnId: 'synthetic-turn',
+            inputConfig: { cliType: 'custom', agentType: 'claude' },
+          }),
+          readLiveStatus: async () => {
+            throw new Error('Archive must not request live status');
+          },
+          cancelSession: async () => {
+            throw new Error('Archive is observed, not a cancellation request');
+          },
+          dispatchSession: async () => {
+            throw new Error('Archive must not dispatch a Session');
+          },
+        },
+      });
+      if (composition === 'cloud') {
+        vi.spyOn(commandRuntime, 'getAuthContextOrThrow').mockImplementation(createAuth);
+        vi.spyOn(commandRuntime, 'resolveWorkspaceOrThrow').mockResolvedValue({
+          id: workspaceId,
+          name: 'Synthetic',
+          slug: 'synthetic',
+          role: 'owner',
+        });
+      }
+      const sync = vi.spyOn(manager, 'syncMetaOrThrow');
+      sync.mockRejectedValueOnce(new Error('Synthetic metadata unavailable'));
+      vi.spyOn(manager, 'waitUntilMetaSynced').mockResolvedValue(true);
+      const archive = () => {
+        const execute = () =>
+          executeDaemonSessionTool(context(), 'lody_session_archive', { sessionId });
+        return composition === 'local'
+          ? runWithSessionCommandEnvironment(environment, execute)
+          : runWithDaemonWorkspace(daemon, execute);
+      };
+
+      expect((await archive()).isError).toBe(true);
+      for (const session of sessions)
+        expect((await manager.repo.getDocMeta(getSessionRoomId(session.id)))?.meta).toEqual(
+          session
+        );
+
+      sync.mockResolvedValue();
+      // Repeated archive is idempotent and must not reach independently opened work.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = await archive();
+        expect(result.isError, JSON.stringify(result)).not.toBe(true);
+        expect(JSON.parse(result.content[0]?.text ?? '{}')).toEqual({
+          ok: true,
+          sessionId,
+          archivedChildSessionIds: [tab.id],
+        });
+      }
+      for (const session of [root, tab])
+        expect((await manager.repo.getDocMeta(getSessionRoomId(session.id)))?.meta).toMatchObject({
+          isArchived: true,
+          status: SessionStatusFactory.idle(),
+        });
+      for (const session of independentSessions)
+        expect((await manager.repo.getDocMeta(getSessionRoomId(session.id)))?.meta).toEqual(
+          session
+        );
+    }
+  );
 
   it('executes a Session tool for another requester against the daemon replica', async () => {
     const result = await runWithDaemonWorkspace(daemon, () =>

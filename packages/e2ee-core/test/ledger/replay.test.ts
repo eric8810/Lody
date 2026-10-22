@@ -1254,6 +1254,18 @@ describe('authenticated snapshot migration reproduction', () => {
     expect(
       code(Snapshots.verifyLedgerSnapshot({ ...data, snapshot: ok(encodeSnapshotCbor(root)) }))
     ).toBe('bad-signature');
+    // Validly signed bodies of another version (1 was the pre-compact layout) are rejected.
+    expect((ok(decodeSnapshotCbor(data.proposal.bodyBytes)) as CborValue[])[0]).toBe(2);
+    for (const version of [1, 3])
+      expect(
+        code(
+          Snapshots.verifyLedgerSnapshot(
+            editedSnapshot(view, owner, (body) => {
+              body[0] = version;
+            })
+          )
+        )
+      ).toBe('unknown-version');
     expect(
       code(
         Snapshots.verifyLedgerSnapshot({
@@ -2251,9 +2263,40 @@ describe('retained verified state', () => {
     expect(
       code(Ledger.restoreVerifiedState({ ...saved, bytes: saved.bytes.subarray(0, 40) }))
     ).not.toBe('accepted');
-    const future = new Uint8Array(saved.bytes);
-    future[1] = 2;
-    expect(code(Ledger.restoreVerifiedState({ ...saved, bytes: future }))).toBe('unknown-version');
+    // Current-only: a row written before version 2 (or by a newer client) is rebuilt by full replay.
+    for (const version of [1, 3]) {
+      const stale = new Uint8Array(saved.bytes);
+      expect(stale[1]).toBe(2);
+      stale[1] = version;
+      expect(code(Ledger.restoreVerifiedState({ ...saved, bytes: stale }))).toBe('unknown-version');
+    }
+  });
+
+  it('checks the stored state digest when the caller supplies it', () => {
+    const o = history(),
+      full = ok(o.verify()),
+      saved = ok(Ledger.exportVerifiedState(full));
+    // The digest is the comparison-note digest, recomputed from the retained bytes alone.
+    expect(hex(saved.stateDigest)).toBe(hex(ok(Snapshots.ledgerStateDigest(full))));
+    expect(comparable(ok(Ledger.restoreVerifiedState(saved)))).toEqual(comparable(full));
+    const { stateDigest: _, ...withoutDigest } = saved;
+    expect(comparable(ok(Ledger.restoreVerifiedState(withoutDigest)))).toEqual(comparable(full));
+
+    const wrong = ok(Bytes.recordHash(filled(7)));
+    expect(code(Ledger.restoreVerifiedState({ ...saved, stateDigest: wrong }))).toBe(
+      'state-digest-mismatch'
+    );
+    // Flipping the provenance byte keeps the bytes decodable but leaves the
+    // digest unchanged (provenance is not part of it); a byte inside S does not.
+    const provenance = new Uint8Array(saved.bytes);
+    provenance[provenance.length - 1] = 1;
+    expect(ok(Ledger.restoreVerifiedState({ ...saved, bytes: provenance })).verification).toBe(
+      'endorsed-snapshot'
+    );
+    const earlier = ok(Ledger.exportVerifiedState(prefix(o, 4)));
+    expect(code(Ledger.restoreVerifiedState({ ...earlier, stateDigest: saved.stateDigest }))).toBe(
+      'state-digest-mismatch'
+    );
   });
 
   it('keeps every author and reports the publications it does not retain as unavailable', () => {
@@ -2520,11 +2563,11 @@ describe('compact authorization state', () => {
     a.set(b.subarray(32, 64), 32);
     b.set(encA, 32);
     setStateRows(state, rows);
-    const swapped = ok(
-      Ledger.restoreVerifiedState({ ...saved, bytes: ok(encodeRetainedCbor(root)) })
-    );
-    expect(hex(ok(Snapshots.ledgerStateDigest(swapped)))).not.toBe(
-      hex(ok(Snapshots.ledgerStateDigest(full)))
-    );
+    const { stateDigest, ...position } = saved,
+      bytes = ok(encodeRetainedCbor(root));
+    const swapped = ok(Ledger.restoreVerifiedState({ ...position, bytes }));
+    expect(hex(ok(Snapshots.ledgerStateDigest(swapped)))).not.toBe(hex(stateDigest));
+    // With the stored digest, restore itself detects the rewrite.
+    expect(code(Ledger.restoreVerifiedState({ ...saved, bytes }))).toBe('state-digest-mismatch');
   });
 });

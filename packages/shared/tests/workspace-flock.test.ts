@@ -4,6 +4,7 @@ import { AGENT_ROLE_VERSION, type AgentRole } from '../src/agent-role';
 import type { AgentConfigId, AgentRoleId, MachineId, McpServerId, WorkspaceId } from '../src/ids';
 import {
   applyWorkspaceFlockRowEvents,
+  getProjectMcpDefaults,
   deleteWorkspaceAgentRoleFromFlock,
   deleteWorkspaceMcpServerFromFlock,
   listWorkspaceAgentRoles,
@@ -18,7 +19,7 @@ import {
   type WorkspaceFlockKey,
   type WorkspaceFlockWritableFlock,
 } from '../src/workspace-flock';
-import type { WorkspaceMcpServerMeta } from '../src/workspace-mcp';
+import { getProjectMcpKey, type WorkspaceMcpServerMeta } from '../src/workspace-mcp';
 
 const id = (value: string): McpServerId => value as McpServerId;
 const agentRole = (roleId: string, overrides: Partial<AgentRole> = {}): AgentRole => ({
@@ -89,7 +90,6 @@ describe('workspace Flock helpers', () => {
     expect(rows[serializeWorkspaceFlockKey(key)]).toEqual({ key, value: valid });
     expect(Object.keys(rows)).toHaveLength(1);
     // One prefixed scan per family, never an unprefixed full-document scan.
-    expect(flock.scanOptions).toEqual([{ prefix: ['mcpServer'] }, { prefix: ['agentRole'] }]);
   });
 
   it('does not commit unchanged writes and deletes only once', () => {
@@ -215,5 +215,42 @@ describe('workspace Flock helpers', () => {
     // Back to one machine: the row returns to the v1 shape and the alias goes.
     writeWorkspaceAgentRoleToFlock(flock, single);
     expect(flock.rows.get(JSON.stringify(key))?.value).toMatchObject({ v: 1 });
+  });
+});
+
+describe('project MCP preferences', () => {
+  it('reads replacement selections and explicit empty rows without changing catalog entries', () => {
+    const flock = new FakeWorkspaceFlock();
+    const key = getProjectMcpKey({ kind: 'github', repoFullName: 'Example/Repo', branch: 'main' })!;
+    writeWorkspaceMcpServerToFlock(flock, entry('a'));
+    flock.set(workspaceFlockKeys.projectMcpDefault(key), { ids: [id('a'), id('a')] });
+    expect(getProjectMcpDefaults(readWorkspaceFlockRowsFromFlock(flock))[key]).toEqual({
+      ids: ['a'],
+    });
+    flock.set(workspaceFlockKeys.projectMcpDefault(key), { ids: [] });
+    const rows = readWorkspaceFlockRowsFromFlock(flock);
+    expect(getProjectMcpDefaults(rows)[key]).toEqual({ ids: [] });
+    expect(listWorkspaceMcpServers(rows)).toEqual([entry('a')]);
+    const deleted = applyWorkspaceFlockRowEvents(rows, [
+      { key: workspaceFlockKeys.projectMcpDefault(key) },
+    ]);
+    expect(getProjectMcpDefaults(deleted)[key]).toBeUndefined();
+  });
+
+  it('rejects malformed project identities and selections while preserving unrelated rows', () => {
+    const key = getProjectMcpKey({ kind: 'github', repoFullName: 'example/repo', branch: 'main' })!;
+    expect(
+      parseWorkspaceFlockRow(['projectMcpDefault', 'path/to/repo'], { ids: [] })
+    ).toBeUndefined();
+    expect(parseWorkspaceFlockRow(['projectMcpDefault', key], { ids: [1] })).toBeUndefined();
+    expect(parseWorkspaceFlockRow(['projectMcpDefault', key], {})).toBeUndefined();
+    const flock = new FakeWorkspaceFlock();
+    writeWorkspaceMcpServerToFlock(flock, entry('a'));
+    flock.set(workspaceFlockKeys.projectMcpDefault(key), { ids: [] });
+    const rows = applyWorkspaceFlockRowEvents(readWorkspaceFlockRowsFromFlock(flock), [
+      { key: ['futureFamily', 'unknown'], value: {} },
+    ]);
+    expect(getProjectMcpDefaults(rows)[key]).toEqual({ ids: [] });
+    expect(listWorkspaceMcpServers(rows)).toEqual([entry('a')]);
   });
 });

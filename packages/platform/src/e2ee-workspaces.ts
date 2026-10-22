@@ -28,6 +28,7 @@ export interface E2eeWorkspacePrepared extends E2eeWorkspacePrepareInput {
  * The developer preference controls new creation only, never existing reads.
  */
 export interface PlatformE2eeWorkspaces {
+  readonly runtime?: E2eeWorkspaceRuntime;
   /** Absent when this platform has no installed, persistent key-custody adapter.
    * A failed/unknown creation preserves its original local intent for reconciliation.
    */
@@ -36,7 +37,9 @@ export interface PlatformE2eeWorkspaces {
    * same request, never generate another identity or silently create plaintext.
    */
   readonly create: (input: E2eeWorkspaceCreateRequest) => Promise<E2eeWorkspaceCreateResult>;
-  /** Resolve persisted mode or explicit legacy admission before cloud attachment.
+  /** Resolve persisted mode or explicit legacy admission. Workspaces with local
+   * encrypted evidence or an encrypted listing need it before cloud attachment;
+   * others open provisionally and are verified in the background.
    * Legacy admission does not classify a workspace as plaintext. Cached IDs,
    * missing fields and unknown modes are never inferred to be plaintext proof.
    */
@@ -45,4 +48,35 @@ export interface PlatformE2eeWorkspaces {
    * The caller verifies continuity/signatures and its independent genesis pin.
    */
   readonly history: (input: E2eeWorkspaceHistoryRequest) => Promise<E2eeWorkspaceHistoryPage>;
+}
+
+/** Public status of a host-owned runtime. No secret key material crosses this port. */
+export interface E2eeRuntimeStatus {
+  readonly workspaceId: string;
+  readonly genesisHash: string;
+  readonly length: number;
+  readonly headHash: string;
+  readonly stateDigest: string;
+  readonly position: string | null;
+  readonly epoch: number;
+  readonly rotationRequired: boolean;
+  readonly deviceKind: 'personal' | 'machine' | 'recovery' | null;
+  readonly hasCurrentKey: boolean;
+  readonly continuityPending: boolean;
+  readonly upgradeRequiredAt?: number;
+}
+/** The main process's own public export, for ledger display without another replay. */
+export interface E2eeRuntimeLedgerView {
+  readonly status: E2eeRuntimeStatus;
+  readonly stateHex: string;
+  readonly recordsHex: readonly string[];
+}
+/** Desktop-only purpose-limited IPC; opening an existing workspace never creates an identity. */
+export interface E2eeWorkspaceRuntime {
+  recordCreated(input: { workspaceId: string; genesisHash: string; requestId?: string }): Promise<void>;
+  open(workspaceId: string, observed?: { genesisHash: string; headHash: string; length: number }): Promise<E2eeRuntimeStatus>;
+  close(workspaceId: string): Promise<void>;
+  status(workspaceId: string): Promise<E2eeRuntimeStatus>;
+  ingestLedgerRecords(workspaceId: string, page: E2eeWorkspaceHistoryPage): Promise<E2eeRuntimeStatus>;
+  ledgerView(workspaceId: string): Promise<E2eeRuntimeLedgerView>;
 }

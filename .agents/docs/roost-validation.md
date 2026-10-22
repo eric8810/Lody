@@ -6,6 +6,8 @@ does not require rediscovering them. Runtime contracts remain in
 [session rules](../../apps/cli/src/session/AGENTS.md) and the matching Roost source.
 Run expensive measurements manually; timing is never a CI assertion.
 
+For the current coordinated release, use the [PR stack integration review](../notes/proposed/testing/2026-10-22-roost-pr-stack-integration.md) for exact heads, dependency order and release gates.
+
 ## Prepare once per source revision
 
 Use separate source clones with their own dependency directories for baseline
@@ -13,6 +15,14 @@ and candidate. Record both repository SHAs, uncommitted runtime diffs, Node
 version, platform/architecture, package-manager versions and loaded SDK/Native
 paths. A branch name or unchanged package version does not identify a candidate.
 Use synthetic data in fresh directories; do not point a benchmark at live state.
+
+Electron staging tests additionally require the installed split Native platform
+package. A Native source checkout with an adjacent addon can exercise CLI behavior
+but does not provide that package layout. For whole-workspace validation, prepare
+the same-revision six-platform CI artifacts with Native `release:prepare` and
+`release:check`, run `packed:smoke`, and install the generated local tarballs in a
+private consumer. Point the isolated CLI Native link to that installed package;
+record the CI source tree and selected binary hash as well as the SDK revision.
 
 Install Lody from its root with `corepack pnpm install --frozen-lockfile`, following
 the root runtime floor. Run `corepack pnpm run docs status` once at task start.
@@ -30,8 +40,11 @@ RUSTUP_TOOLCHAIN=stable corepack pnpm build
 ```
 
 Roost has no root `package.json`; running pnpm at its root can select the wrong
-pnpm version. Reuse an existing addon only when Rust, Native glue and build
-inputs are unchanged; record its hash. Use Roost's `ts` `pack:consumer` and Native
+pnpm version. Reuse an existing addon only with a recorded build-input manifest matching Rust,
+Native glue and build inputs; record its hash. An adjacent addon file or matching
+package version alone is insufficient. Check the Native capability handshake and
+one actual SDK write/reopen before starting a whole-workspace run; rebuild from
+the fixed revision if build provenance or the reply protocol is uncertain. Use Roost's `ts` `pack:consumer` and Native
 `release:prepare`/`release:check` for package verification rather than inventing
 another packaging process. Rebuilding an unchanged addon is unnecessary.
 
@@ -95,7 +108,9 @@ node --test --test-concurrency=1 --test-name-pattern='webkit' tests/lody-history
 ```
 
 Run `node --test tests/native.test.mjs` from Roost's `node/native` with the matching
-SDK built. It requires the addon; subprocess-only tests use the matching owner
+SDK built. For the complete Native/sync/release-unit suite, use `npm test`: the
+publisher fixtures require npm's executable path and do not accept a direct
+`node --test tests/release.test.mjs` invocation. It requires the addon; subprocess-only tests use the matching owner
 binary. Follow that checkout's Native README/CI for Rust and package checks.
 
 ## Choose a fixed manual benchmark
@@ -109,13 +124,13 @@ TSX_TSCONFIG_PATH=tsconfig.json node --experimental-wasm-modules --import ./node
 Replace the filename for the other `.mts` entries and use their documented
 `BENCH_*` options. Do not compare their numbers across different scopes:
 
-| Entry                                                                      | Question / fixed case                                                                                     | Durability and excluded costs                                                                                                        |
-| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| [`roost-send.mts`](../../apps/cli/benchmarks/roost-send.mts)               | First input + three follow-ups; 9 samples, 2 warmups; `BENCH_DISPATCH=1` includes activation              | Roost durable; Loro in memory. No network, Agent execution or renderer                                                               |
-| [`roost-first-input.mts`](../../apps/cli/benchmarks/roost-first-input.mts) | Cold open / first input after 0, 100, 1000 messages; same `BENCH_DIR`, `BENCH_PHASE=prepare` then measure | Roost durable; Loro snapshot restored into memory. File cache may be warm                                                            |
-| [`roost-history.mts`](../../apps/cli/benchmarks/roost-history.mts)         | Windowed reads at 100, 1000, 10000 messages; 4 KiB bodies; `BENCH_STRUCTURAL=1` adds structural work      | Production backends + ConversationView. No renderer transport, IndexedDB or paint                                                    |
-| [`roost-durable.test.ts`](../../apps/cli/benchmarks/roost-durable.test.ts) | Durable growing history and growing reply; explicit write → fresh-process reopen → paging                 | Both sides SQLite WAL/FULL and control persistence after every action; live incremental reader measured separately. No network or UI |
-| [`roost-dispatch.test.ts`](../../apps/cli/benchmarks/roost-dispatch.test.ts) | Fixed 100/1,000/10,000-message prefixes, actual watcher selection, 20 appends and fresh-process verification | Both sides SQLite WAL/FULL plus per-action control persistence; selected boundary excludes ACP execution, transport and renderer |
+| Entry                                                                        | Question / fixed case                                                                                        | Durability and excluded costs                                                                                                        |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| [`roost-send.mts`](../../apps/cli/benchmarks/roost-send.mts)                 | First input + three follow-ups; 9 samples, 2 warmups; `BENCH_DISPATCH=1` includes activation                 | Roost durable; Loro in memory. No network, Agent execution or renderer                                                               |
+| [`roost-first-input.mts`](../../apps/cli/benchmarks/roost-first-input.mts)   | Cold open / first input after 0, 100, 1000 messages; same `BENCH_DIR`, `BENCH_PHASE=prepare` then measure    | Roost durable; Loro snapshot restored into memory. File cache may be warm                                                            |
+| [`roost-history.mts`](../../apps/cli/benchmarks/roost-history.mts)           | Windowed reads at 100, 1000, 10000 messages; 4 KiB bodies; `BENCH_STRUCTURAL=1` adds structural work         | Production backends + ConversationView. No renderer transport, IndexedDB or paint                                                    |
+| [`roost-durable.test.ts`](../../apps/cli/benchmarks/roost-durable.test.ts)   | Durable growing history and growing reply; explicit write → fresh-process reopen → paging                    | Both sides SQLite WAL/FULL and control persistence after every action; live incremental reader measured separately. No network or UI |
+| [`roost-dispatch.test.ts`](../../apps/cli/benchmarks/roost-dispatch.test.ts) | Fixed 100/1,000/10,000-message prefixes, actual watcher selection, 20 appends and fresh-process verification | Both sides SQLite WAL/FULL plus per-action control persistence; selected boundary excludes ACP execution, transport and renderer     |
 
 The durable harness has an explicit opt-in config, excluded from default CI.
 Set an absolute, fresh `BENCH_DIR` outside the source checkout. Use the same

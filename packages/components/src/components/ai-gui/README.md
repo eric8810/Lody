@@ -54,8 +54,11 @@ the reasoning behind those rules.
   incomplete copy events before the extension can write clipboard data; see the
   [integration note](../../../../../.agents/notes/implemented/feature/2026-10-16-math-selection-copy.md).
   `markdown-code-block.tsx` owns fenced
-  blocks, wrap, and Markdown-fence preview (`markdown-code-highlight.ts` the Shiki
-  tokens); `markdown-diff-block.tsx` is the inline diff; `markdown-mermaid-block.tsx`
+  blocks, wrap, and Markdown-fence preview (`markdown-code-highlight.ts` the Highlights
+  tokens). Unsupported optional languages use an isolated Shiki fallback;
+  its native grammar registry owns loaded-language state, while Lody shares
+  fallback initialization and clears failed initialization for retry.
+  `markdown-diff-block.tsx` is the inline diff; `markdown-mermaid-block.tsx`
   renders a closed Mermaid fence. Diagrams are split three ways: `use-mermaid-diagram-canvas.tsx`
   owns activation and the gestures that follow it, `mermaid-inline-canvas.ts` the
   pure zoom/pan geometry, and `mermaid-diagram-viewer.tsx` the full-screen
@@ -308,6 +311,14 @@ portal is outside that drawer's modal boundary: its scroll lock ate every touch
 scroll and a sideways swipe dragged the session away. So inside a
 `[data-vaul-drawer]` the dialog mounts in the drawer, `data-vaul-no-drag`,
 with a no-drag layer over its backdrop (`InMobileDrawer` story).
+
+The Loro conversation view carries display-only task metadata and a bounded latest
+step, not every child transcript. The task's non-enumerable `history` capability
+reads one exact owned run only after its detail mounts. Activity shows loading or
+retry until that read completes; a preview must never masquerade as the full run.
+Changing the selected task or closing the dialog discards late results and releases
+the full body. Static shares and other readers without this capability keep their
+already complete task data. Export/copy/replay use authoritative full readers.
 
 ## Creation progress
 

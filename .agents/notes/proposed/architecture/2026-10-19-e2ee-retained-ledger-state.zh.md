@@ -21,7 +21,7 @@ PR：[LodyAI/Lody#1625](https://github.com/LodyAI/Lody/pull/1625)（Spec）、[l
 ## core 已有的能力
 
 - 完整权限状态的规范、排序 CBOR 编码（`authState`，快照正文使用），同一状态只有一种字节形式。
-- `stateDigest = sha256("lody-e2ee/snapshot-digest/v1\0" ‖ 正文)`，以及用于跨方发现分叉的 comparison note。
+- `stateDigest = sha256("lody-e2ee/snapshot-digest/v2\0" ‖ 正文)`，以及用于跨方发现分叉的 comparison note。
 - 在已有 view 上增量 `extendLedger`。
 - `verifyLedgerSnapshot`：从 Owner/Admin 个人设备背书的快照加外部确认的位置开始一个 view，为设备加入而设计。
 
@@ -105,7 +105,7 @@ PR：[LodyAI/Lody#1625](https://github.com/LodyAI/Lody/pull/1625)（Spec）、[l
 
 ## 考虑过的其他方案
 
-- **每次恢复都重算摘要。** 否决：字节和摘要存在同一个受信任的存储里，能改一个就能改另一个。它只能发现 bug 或存储损坏，这属于可选、暂缓、不在热路径上的后台审计。
+- **每次恢复都重算摘要。** 否决：字节和摘要存在同一个受信任的存储里，能改一个就能改另一个。它只能发现 bug 或存储损坏，这属于可选、暂缓、不在热路径上的后台审计。此项已部分被取代：恢复现在会校验调用方自愿提供的摘要（一次 SHA-256），仍只是损坏检查，不是安全边界；见[紧凑状态记录](2026-10-20-e2ee-compact-ledger-state.zh.md#恢复时的摘要校验)。
 - **保持全量重放，只提高上限。** 否决：每次请求的成本仍是线性的。
 - **由服务端背书快照。** 不可行：背书需要 Owner/Admin 个人设备的签名。
 - **用服务端密钥对保留字节做 MAC。** 否决，理由同重算：处在同一信任域内。

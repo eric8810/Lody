@@ -16,7 +16,7 @@ import {
   usePlatformSession,
   usePlatformWorkspaces,
 } from '@lody/platform/react';
-import { retainWorkspaceModeProof } from '@/lib/e2ee-workspace-storage';
+import { readWorkspaceModeEvidence, retainWorkspaceModeProof } from '@/lib/e2ee-workspace-storage';
 import {
   EncryptedWorkspaceMark,
   isListedEncryptedWorkspace,
@@ -595,6 +595,24 @@ interface WorkspaceScreenProps {
   onNext: () => void;
 }
 
+/** Wraps a failed content-mode check so the toast keeps the generic switch copy. */
+class WorkspaceModeCheckError extends Error {
+  constructor(cause: unknown) {
+    super('Workspace mode check failed', { cause });
+    this.name = 'WorkspaceModeCheckError';
+  }
+}
+
+/** Unreadable local records cannot prove plaintext, so they count as evidence. */
+function hasLocalEncryptedEvidence(accountId: string, workspaceId: string): boolean {
+  try {
+    const evidence = readWorkspaceModeEvidence(localStorage, accountId, workspaceId);
+    return evidence.encrypted || evidence.rejected;
+  } catch {
+    return true;
+  }
+}
+
 // Existing names stay untouched here. A missing slug is repaired inline because
 // workspace settings cannot be routed to until that slug exists.
 /** Marks a slow slug check without treating an unanswered query as validation. */
@@ -885,7 +903,13 @@ export function WorkspaceScreen({ onBack, onNext }: WorkspaceScreenProps) {
     if (selectedWorkspaceId === null || writePending) return;
     const target = workspaces.find((workspace) => workspace.id === selectedWorkspaceId);
     if (!target?.slug) return;
-    if (selectedWorkspaceId === activeWorkspaceId && !platform.e2eeWorkspaces) {
+    // Only a workspace that may be encrypted needs its mode before activation;
+    // the workspace runtime verifies every other workspace in the background.
+    const verifyMode = Boolean(
+      platform.e2eeWorkspaces &&
+      (target.encrypted || (accountId && hasLocalEncryptedEvidence(accountId, target.id)))
+    );
+    if (selectedWorkspaceId === activeWorkspaceId && !verifyMode) {
       commitWorkspaceContext(target);
       onNext();
       return;
@@ -902,12 +926,18 @@ export function WorkspaceScreen({ onBack, onNext }: WorkspaceScreenProps) {
     const switchWrite = trackWorkspaceWrite(
       platform.workspaces,
       (async () => {
-        if (platform.e2eeWorkspaces) {
-          const mode = await platform.e2eeWorkspaces.describe({ workspaceId: selectedWorkspaceId });
-          if (!accountId || mode.workspaceId !== selectedWorkspaceId)
-            throw new Error('Unknown workspace content mode');
-          retainWorkspaceModeProof(localStorage, accountId, target.slug, mode);
-          if ('contentMode' in mode && mode.contentMode === 'e2ee') return mode;
+        if (verifyMode && platform.e2eeWorkspaces) {
+          try {
+            const mode = await platform.e2eeWorkspaces.describe({
+              workspaceId: selectedWorkspaceId,
+            });
+            if (!accountId || mode.workspaceId !== selectedWorkspaceId)
+              throw new Error('Unknown workspace content mode');
+            retainWorkspaceModeProof(localStorage, accountId, target.slug, mode);
+            if ('contentMode' in mode && mode.contentMode === 'e2ee') return mode;
+          } catch (error) {
+            throw new WorkspaceModeCheckError(error);
+          }
         }
         await platform.workspaces.setActive(selectedWorkspaceId);
         return null;
@@ -962,7 +992,10 @@ export function WorkspaceScreen({ onBack, onNext }: WorkspaceScreenProps) {
         if (writeAttemptRef.current !== attempt) return;
         setSaving(false);
         setWritePending(false);
-        console.error('[onboarding] Failed to switch workspace:', error);
+        console.error(
+          '[onboarding] Failed to switch workspace:',
+          error instanceof WorkspaceModeCheckError ? error.cause : error
+        );
         analytics.capture('onboarding/operation_failed', {
           step: 'workspace',
           operation: 'workspace_switch',
@@ -973,7 +1006,10 @@ export function WorkspaceScreen({ onBack, onNext }: WorkspaceScreenProps) {
         commitWorkspaceContext(activeWorkspace);
         toast.error(
           t('onboarding.workspace.switchFailed', 'Could not switch workspace. Try again.'),
-          { description: error instanceof Error ? error.message : String(error) }
+          // Mode-check failures are internal codes; the generic copy stands alone.
+          error instanceof WorkspaceModeCheckError
+            ? undefined
+            : { description: error instanceof Error ? error.message : String(error) }
         );
       }
     );

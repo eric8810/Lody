@@ -59,6 +59,10 @@ See the [decision and verification](../../../../.agents/notes/implemented/bug-fi
   target for daemon replay, and `session_create({ operationId, resume: true })` recovers it without
   the prompt. Completion is delivered automatically — no public wait tool — and legacy `wait=true`
   is a temporary adapter new callers must not use.
+- Single create can outlast a client's tool timeout, and Agents then tend to retry under a fresh
+  id. While the original is active, an identical create from the same source Turn adopts it and
+  returns its snapshot with a `notice` instead of creating a second Session
+  ([note](../../../../.agents/notes/implemented/bug-fix/2026-10-21-mcp-create-fresh-id-retry.md)).
 
 ## Machine catalog retry guidance
 
@@ -100,6 +104,15 @@ See the [decision and verification](../../../../.agents/notes/implemented/bug-fi
   probe mismatch cannot reject them, and missing per-model data defers to runtime. Drop
   incompatible inherited selectors; fill builtin mode only when still empty.
   ([note](../../../../.agents/notes/implemented/bug-fix/2026-09-17-chat-follow-up-inherits-target-run-config.md))
+
+MCP create/chat (including batches) accept optional `mcpServerIds`. Explicit `[]`
+selects none. Creation without ids resolves target-project defaults, or workspace
+defaults when the project has no preference; continuation without ids inherits the
+target conversation's selection. Acceptance records ids in the existing per-target
+Operation configuration, so materialization/recovery does not reread edited defaults.
+Role pins do not override an explicit MCP selection. CLI create/chat expose the same
+choice as `--mcp-server-ids '<JSON array>'`. See the
+[project default Spec](../../../../specs/project-default-mcp.md).
 
 ## Daemon routing
 

@@ -277,6 +277,7 @@ import {
 } from '@/components/sessions/desktop-run-config-menu';
 import { resolvePermissionModeFace } from '@/lib/permission-mode-face';
 import { SessionUsagePopover } from '@/components/sessions/session-usage-popover';
+import { useArchiveSessionWithConfirmation } from '@/components/sessions/session-archive-confirmation';
 import { MachinePairingDialog } from './machine-pairing-dialog';
 import {
   DATE_BUCKET_THIS_MONTH,
@@ -1042,7 +1043,6 @@ function WorkspaceChatLanding({
   const [selectedMachineId, setSelectedMachineId] = useState<MachineId | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<AgentSelection | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const mcpSelection = useSessionMcpSelection(undefined, { disabled: submitting });
   // The project selector always uses the machine-aware picker so multi-machine
   // workspaces can choose the target explicitly. Standalone Electron entry
   // points such as the sidebar and onboarding may still use the native dialog.
@@ -1171,6 +1171,20 @@ function WorkspaceChatLanding({
   machinesRef.current = machines;
   const selectedLocalProjectMachineId = selectedLocalProject?.machineId ?? null;
   const activeLocalProjectId = selectedLocalProject?.localProjectId ?? null;
+  // A new conversation starts from its target project's defaults. Branch and
+  // worktree are not part of the project's identity, so they are left out.
+  const mcpSelection = useSessionMcpSelection(undefined, {
+    disabled: submitting,
+    defaultsTarget:
+      contextType === 'local' && activeLocalProjectId
+        ? {
+            project: { kind: 'local', localProjectId: activeLocalProjectId },
+            machineId: selectedLocalProjectMachineId,
+          }
+        : contextType === 'github' && selectedRepo
+          ? { project: { kind: 'github', repoFullName: selectedRepo, branch: '' } }
+          : { project: null },
+  });
   const hasWorkspaceRuntime = Boolean(runtime);
   const canUseSelectedLocalProjectDesktopControl = useMemo(
     () =>
@@ -2875,7 +2889,8 @@ function WorkspaceChatLanding({
         | 'missing_context'
         | 'local_project_git_state_failed'
         | 'missing_branch'
-        | 'missing_project',
+        | 'missing_project'
+        | 'mcp_defaults_not_ready',
       extra?: Record<string, unknown>
     ) => {
       capturePostHogEvent(postHog, 'session/input_blocked', {
@@ -2939,6 +2954,20 @@ function WorkspaceChatLanding({
     if (!selectedAgent || !selectedConfig) {
       captureSessionInputBlocked('missing_agent_config');
       setComposerError(t('chat.validation.missingAgent'));
+      return;
+    }
+    // The selection still comes from defaults that were never read; sending now
+    // would create the conversation with no MCP servers instead of its defaults.
+    if (!mcpSelection.ready) {
+      captureSessionInputBlocked('mcp_defaults_not_ready');
+      setComposerError(
+        mcpSelection.defaultsFailed
+          ? t(
+              'chat.validation.mcpDefaultsFailed',
+              'Default MCP servers couldn’t be read, so this conversation can’t be created yet.'
+            )
+          : t('chat.validation.mcpDefaultsLoading', 'Loading this project’s default MCP servers…')
+      );
       return;
     }
     const scopedMachineId =
@@ -4267,6 +4296,7 @@ function WorkspaceChatLanding({
     isRuntimeInitializing: runtimeInitializing,
     isLoadingLocalGitState: loadingLocalGitState,
     hasLocalGitStateError: Boolean(localGitStateError),
+    mcpDefaultsPending: !mcpSelection.ready && !mcpSelection.defaultsFailed,
   });
   const selectedMachineHasVisibleLocalProject = useMemo(
     () =>
@@ -5348,11 +5378,12 @@ function WorkspaceChatLanding({
     },
     [setSessionPinned]
   );
+  const archiveSessionWithConfirmation = useArchiveSessionWithConfirmation(archiveSession);
   const handleMobileChatArchive = useCallback(
     (chatId: string) => {
-      void archiveSession(chatId as SessionId);
+      void archiveSessionWithConfirmation(chatId as SessionId);
     },
-    [archiveSession]
+    [archiveSessionWithConfirmation]
   );
   /* Restore (un-archive) from the mobile archived-list swipe drawer.
      Same `restoreSession` the desktop archive view uses; the row drops
@@ -6392,7 +6423,7 @@ function WorkspaceChatLanding({
               command: 'npx lody daemon start',
               commandHint: t(
                 'chat.mobileHome.onboarding.commandHint',
-                'Run it on a server, VM, or your own computer (Node.js 22.14+). It signs the machine into your account — a machine without a browser prints a link you can open on this phone.'
+                'Run it on a server, VM, or your own computer (Node.js 22.23.4+ (22.x), 24.22.1+ (24.x), or 26.12.1+ (26.x)). It signs the machine into your account — a machine without a browser prints a link you can open on this phone.'
               ),
               copyCommandLabel: t('chat.mobileHome.onboarding.copyCommand', 'Copy command'),
               shareCommandLabel: t('chat.mobileHome.onboarding.shareCommand', 'Send to computer'),

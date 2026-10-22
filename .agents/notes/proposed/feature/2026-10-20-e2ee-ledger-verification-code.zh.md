@@ -13,7 +13,7 @@ PRs: [LodyAI/Lody#1625](https://github.com/LodyAI/Lody/pull/1625)
 
 ## 决定
 
-- **核验码是什么。** 核心库的 `ledgerStateDigest(view)` 返回 `comparisonNote` 已在计算的摘要，即 `sha256("snapshot-digest/v1" ‖ CBOR[1, 创世, 长度, head, 授权状态])`，但不要求账本中的设备作为签名者。控制页不持有设备密钥，无法调用 `comparisonNote`。[白皮书](../../../../specs/e2ee/whitepaper.zh.md)要求安全码绑定实际状态：仅有 head 时，状态可能是错的，例如通过快照初始化的客户端。
+- **核验码是什么。** 核心库的 `ledgerStateDigest(view)` 返回 `comparisonNote` 已在计算的摘要，即 `sha256("snapshot-digest/v2" ‖ CBOR[2, 创世, 长度, head, 授权状态])`，但不要求账本中的设备作为签名者。控制页不持有设备密钥，无法调用 `comparisonNote`。[白皮书](../../../../specs/e2ee/whitepaper.zh.md)要求安全码绑定实际状态：仅有 head 时，状态可能是错的，例如通过快照初始化的客户端。
 - **版本**即已验证记录数。二维码内容为 `lody-ledger:1:<版本>:<head>:<摘要>`；复制的文本是一行带版本的标题，加上分成 16 组、每组 4 位的摘要。
 - **比对规则**（`e2ee-ledger-verification.ts`）：
   - 版本和摘要相同（有 head 时 head 也相同）：一致；

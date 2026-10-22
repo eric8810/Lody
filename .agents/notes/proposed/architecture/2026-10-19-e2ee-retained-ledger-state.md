@@ -21,7 +21,7 @@ The private E2EE backend reads the whole permission ledger from Loro Streams and
 ## What core already provides
 
 - A canonical, sorted CBOR encoding of the complete authorization state (`authState`, used by snapshot bodies), so one state has one byte form.
-- `stateDigest = sha256("lody-e2ee/snapshot-digest/v1\0" ‖ body)` and comparison notes for cross-party fork detection.
+- `stateDigest = sha256("lody-e2ee/snapshot-digest/v2\0" ‖ body)` and comparison notes for cross-party fork detection.
 - Incremental `extendLedger` on a held view.
 - `verifyLedgerSnapshot`, which starts a view from a snapshot endorsed by an Owner/Admin personal device plus an externally confirmed position. It is designed for device joining.
 
@@ -106,7 +106,7 @@ A host-only encoding could omit the 72-byte history packets, which only clients 
 
 ## Alternatives considered
 
-- **Recompute the digest on every restore.** Rejected: the bytes and the digest live in the same trusted store, so whoever can alter one can alter both. It only catches bugs or corruption, which belongs to an optional, deferred background audit off the hot path.
+- **Recompute the digest on every restore.** Rejected: the bytes and the digest live in the same trusted store, so whoever can alter one can alter both. It only catches bugs or corruption, which belongs to an optional, deferred background audit off the hot path. Superseded in part: restore now checks a digest the caller chooses to supply (one SHA-256), still as a corruption check rather than a security boundary; see the [compact state note](2026-10-20-e2ee-compact-ledger-state.md#restore-digest-check).
 - **Keep full replay and raise limits.** Rejected: cost stays linear per request.
 - **Server-endorsed snapshots.** Not possible: endorsement requires an Owner/Admin personal device signature.
 - **MAC the retained bytes with a server key.** Rejected for the same reason as recomputation: same trust domain.

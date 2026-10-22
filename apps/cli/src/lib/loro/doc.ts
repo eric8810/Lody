@@ -297,7 +297,12 @@ class ProxiedWebSocket extends WebSocketOriginal {
 
 (globalThis as unknown as GlobalWithWebSocket).WebSocket = ProxiedWebSocket;
 
-import { FlockSyncTimeoutError, readTimeoutEnv, withTimeout } from './timeout-utils';
+import {
+  FlockSyncTimeoutError,
+  readTimeoutEnv,
+  SYNC_CONFIRMATION_TIMEOUT_MS,
+  withTimeout,
+} from './timeout-utils';
 import { FlockSyncUnavailableError } from './flock-sync-errors';
 import { ConcurrentQueue } from '../concurrent-queue';
 import type { CliSqliteRepoStore } from './sqlite-repo-store';
@@ -564,6 +569,7 @@ export class LoroDocumentManager {
       // long-lived daemon path attaches later via the remote bridge.
       try {
         await manager.attachRemoteStreamsTransport();
+        // Continues in degraded mode on timeout, so this stays a short wait.
         const syncMetaTimeoutMs = readTimeoutEnv('LODY_LORO_SYNC_META_TIMEOUT_MS', 20_000);
         const synced = await manager.waitUntilMetaSynced({
           timeoutMs: syncMetaTimeoutMs,
@@ -702,6 +708,7 @@ export class LoroDocumentManager {
     );
     this.remoteStreamsTokens = streamsTokens;
     const streamsTransport = await createCliStreamsTransport({
+      content: { mode: 'plaintext' },
       workspaceId: this.workspaceId,
       tokenProvider: streamsTokens.legacy,
       repo: this.repo,
@@ -982,7 +989,9 @@ export class LoroDocumentManager {
     options: { timeoutMs?: number; reason?: string; requireRemoteConfirmation?: boolean } = {}
   ): Promise<void> {
     const reason = options.reason ?? 'explicit-sync';
-    const timeoutMs = options.timeoutMs ?? readTimeoutEnv('LODY_LORO_SYNC_META_TIMEOUT_MS', 20_000);
+    const timeoutMs =
+      options.timeoutMs ??
+      readTimeoutEnv('LODY_LORO_SYNC_META_TIMEOUT_MS', SYNC_CONFIRMATION_TIMEOUT_MS);
     const timeoutMessage = `Timeout waiting for workspace metadata sync (workspace=${this.workspaceId})`;
 
     try {
@@ -1020,7 +1029,9 @@ export class LoroDocumentManager {
     options: { timeoutMs?: number; reason?: string } = {}
   ): Promise<void> {
     const reason = options.reason ?? 'explicit-sync';
-    const timeoutMs = options.timeoutMs ?? readTimeoutEnv('LODY_LORO_SYNC_DOC_TIMEOUT_MS', 8_000);
+    const timeoutMs =
+      options.timeoutMs ??
+      readTimeoutEnv('LODY_LORO_SYNC_DOC_TIMEOUT_MS', SYNC_CONFIRMATION_TIMEOUT_MS);
     const timeoutMessage = `Timeout waiting for document sync (doc=${docId})`;
 
     try {
@@ -1072,7 +1083,8 @@ export class LoroDocumentManager {
   ): Promise<void> {
     const reason = options.reason ?? 'explicit-sync';
     const timeoutMs =
-      options.timeoutMs ?? readTimeoutEnv('LODY_LORO_SYNC_MACHINE_FLOCK_TIMEOUT_MS', 8_000);
+      options.timeoutMs ??
+      readTimeoutEnv('LODY_LORO_SYNC_MACHINE_FLOCK_TIMEOUT_MS', SYNC_CONFIRMATION_TIMEOUT_MS);
     const timeoutMessage = `Timeout waiting for Flock document sync (doc=${flockDocId})`;
 
     let activeSync = this.activeFlockDocSyncs.get(flockDocId);
@@ -2442,6 +2454,8 @@ export class SessionDocument implements LoroDocument<Omit<SessionDocMeta, 'histo
         if (binding.status === 'detached') {
           return;
         }
+        // Best effort: a timeout continues offline-first, so this keeps a
+        // short budget rather than SYNC_CONFIRMATION_TIMEOUT_MS.
         const syncDocTimeoutMs = readTimeoutEnv('LODY_LORO_SYNC_DOC_TIMEOUT_MS', 8_000);
         const timeoutMessage = `Timeout waiting for session doc initial sync (room=${this.roomId})`;
         await withTimeout(binding.firstSyncedWithRemote, syncDocTimeoutMs, timeoutMessage);

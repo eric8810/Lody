@@ -145,6 +145,28 @@ const modeKey = (accountId: string, workspaceId: string) =>
   `lody-workspace-mode-proof:${encodeURIComponent(accountId)}:${encodeURIComponent(workspaceId)}`;
 const knownEncryptedKey = (accountId: string, workspaceId: string) =>
   `lody-e2ee-known-mode:${encodeURIComponent(accountId)}:${encodeURIComponent(workspaceId)}`;
+const rejectedModeKey = (accountId: string, workspaceId: string) =>
+  `lody-e2ee-rejected-mode:${encodeURIComponent(accountId)}:${encodeURIComponent(workspaceId)}`;
+
+/** The server answered this account with something other than a plaintext or
+ * legacy admission (a newer, malformed or mismatched mode) while an ordinary
+ * runtime was open provisionally. Sticky like a pin: the workspace never opens
+ * provisionally again and always waits for authoritative admission. The value
+ * is a diagnostic error type only. Returns false when storage refused the write.
+ */
+export function recordWorkspaceModeRejection(
+  storage: Storage,
+  accountId: string,
+  workspaceId: string,
+  reason: string
+): boolean {
+  try {
+    storage.setItem(rejectedModeKey(accountId, workspaceId), reason || 'rejected');
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Only changes to this workspace's admission evidence can invalidate its runtime. */
 export function isWorkspaceModeStorageKey(
@@ -156,7 +178,8 @@ export function isWorkspaceModeStorageKey(
     key === null ||
     key === modeKey(accountId, workspaceId) ||
     key === pinKey(accountId, workspaceId) ||
-    key === knownEncryptedKey(accountId, workspaceId)
+    key === knownEncryptedKey(accountId, workspaceId) ||
+    key === rejectedModeKey(accountId, workspaceId)
   );
 }
 
@@ -208,6 +231,81 @@ function validateDescriptor(descriptor: WorkspaceAdmissionDescriptor): void {
       descriptor.activation !== 'control-only')
   )
     throw corrupt('Invalid encrypted workspace mode proof');
+}
+
+/** What this device retains about one workspace's content mode. */
+export interface WorkspaceModeEvidence {
+  /** Retained authenticated admission for this account and workspace ID, whatever
+   * slug it was saved under: mode is bound to the immutable workspace ID. */
+  descriptor: WorkspaceAdmissionDescriptor | null;
+  /** A genesis pin, learned encrypted mode or encrypted admission exists. Such a
+   * workspace never opens a runtime before authoritative admission. */
+  encrypted: boolean;
+  /** The server once gave a non-plaintext answer that is not a valid encrypted
+   * mode. Also requires authoritative admission, but does not prove encryption. */
+  rejected: boolean;
+}
+
+/** Read every local mode record for one workspace. Unreadable or contradictory
+ * records throw: they can neither prove plaintext nor be ignored. */
+export function readWorkspaceModeEvidence(
+  storage: Storage,
+  accountId: string,
+  workspaceId: string
+): WorkspaceModeEvidence {
+  const pin = readE2eeGenesisPin(storage, accountId, workspaceId);
+  const known = storage.getItem(knownEncryptedKey(accountId, workspaceId));
+  if (known !== null && !/^[0-9a-f]{64}$/.test(known)) throw corrupt('Invalid encrypted evidence');
+  const raw = storage.getItem(modeKey(accountId, workspaceId));
+  let descriptor: WorkspaceAdmissionDescriptor | null = null;
+  if (raw !== null) {
+    const saved = parseJson(raw, 'Invalid workspace mode proof') as {
+      workspaceSlug?: unknown;
+    } | null;
+    if (typeof saved?.workspaceSlug !== 'string') throw corrupt('Invalid workspace mode proof');
+    descriptor = readWorkspaceModeProof(storage, accountId, workspaceId, saved.workspaceSlug);
+  }
+  return {
+    descriptor,
+    rejected: storage.getItem(rejectedModeKey(accountId, workspaceId)) !== null,
+    encrypted:
+      pin !== null ||
+      known !== null ||
+      (descriptor !== null && 'contentMode' in descriptor && descriptor.contentMode === 'e2ee'),
+  };
+}
+
+/** Before the signed-in account is known: does any account on this device hold
+ * evidence that this workspace needs authoritative admission? Only sticky
+ * records count; every encrypted admission also writes the learned-mode marker. */
+export function hasEncryptedEvidenceForAnyAccount(storage: Storage, workspaceId: string): boolean {
+  const suffix = `:${encodeURIComponent(workspaceId)}`;
+  for (let index = 0; index < storage.length; index += 1) {
+    const key = storage.key(index);
+    if (
+      key?.endsWith(suffix) &&
+      (key.startsWith('lody-e2ee-genesis-pin:') ||
+        key.startsWith('lody-e2ee-known-mode:') ||
+        key.startsWith('lody-e2ee-rejected-mode:'))
+    )
+      return true;
+  }
+  return false;
+}
+
+/** An unresolved encrypted creation intent may already own this slug on the server.
+ * Unreadable intents cannot name a slug, so they are not evidence here; the
+ * creation page owns their repair. */
+export function hasPendingE2eeCreationForSlug(
+  storage: Storage,
+  accountId: string,
+  slug: string
+): boolean {
+  try {
+    return listPendingE2eeWorkspaces(storage, accountId).some((pending) => pending.slug === slug);
+  } catch {
+    return false;
+  }
 }
 
 /** A previous authenticated response may reopen an immutable mode offline.

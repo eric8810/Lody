@@ -80,14 +80,12 @@ changes dependencies, native boundaries, consumers or ownership.
 
 ## Contributions and checks
 
-- Roost benchmarks MUST use the [report](.agents/docs/roost-validation.md#report-contract).
-
 - Identify once: Lody team if the user says so or GitHub login is `zxch3n`,
   `Leeeon233`, or `wibus-wee`; otherwise community. Before planning a community
   contribution, read [.github/AGENTS.md](.github/AGENTS.md) for size/assignment rules.
   Read it before any PR/Issue work as well.
-- Node.js 22.14-22.x or 23.6+ (Node-API 10+); use the pnpm in `package.json`. See the
-  [runtime-floor decision](.agents/notes/implemented/bug-fix/2026-09-09-node-api-runtime-floor.md).
+- Node.js 22.23.4+ (22.x), 24.22.1+ (24.x), or 26.12.1+ (26.x), with Node-API 10+; use the pnpm in `package.json`. See the
+  [runtime security decision](.agents/notes/implemented/bug-fix/2026-10-22-node-security-runtime-floor.md).
   `pnpm install` (nested checkouts skip it); standalone work uses a separate clone.
   `pnpm start:local` starts the desktop; root `pnpm build` uses the same local composition.
 - Before commit: `pnpm check` and `pnpm format`. Root packages share `.oxfmtrc.json`;

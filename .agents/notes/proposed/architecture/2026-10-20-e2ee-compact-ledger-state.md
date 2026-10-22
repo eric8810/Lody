@@ -48,12 +48,12 @@ This does not relax anything else:
 
 ### Encoding
 
-The envelopes are unchanged:
+The envelopes keep their shape; their versions and the digest domain move to 2 (see [Format versions](#format-versions)):
 
 ```
-retained state   [1, genesis(32), length, head(32), S, verification (0 full-history, 1 endorsed-snapshot)]
-snapshot body    [1, genesis, length, head, signer, S]
-state digest     sha256("lody-e2ee/snapshot-digest/v1\0" ‖ [1, genesis, length, head, S])
+retained state   [2, genesis(32), length, head(32), S, verification (0 full-history, 1 endorsed-snapshot)]
+snapshot body    [2, genesis, length, head, signer, S]
+state digest     sha256("lody-e2ee/snapshot-digest/v2\0" ‖ [2, genesis, length, head, S])
 ```
 
 `S` is a six-element CBOR array: five byte strings of concatenated fixed-width rows, plus a boolean.
@@ -74,7 +74,30 @@ The following are not stored, because they derive from the tables:
 - closed joins (device key and request ID);
 - every author (the device's membership and that membership's user).
 
-The digest still hashes the retained bytes without their last element, so it needs no second encoding.
+The digest still hashes the retained bytes without their last element, so it needs no second encoding. This requires the digest body and the retained envelope to share one version number.
+
+### Format versions
+
+The compact `S` first shipped under the old version numbers. Version 1 bytes, from either layout, are now rejected:
+
+- The retained envelope and the snapshot body are version 2. The digest domain is `snapshot-digest/v2`, because it hashes different content than v1 did.
+- Decoders accept only the current version. Any other version fails with `unknown-version`. Hosts already treat that as "rebuild by full replay", so a stale retained row heals in one replay.
+- The `snapshot/v1` and `head-attest/v1` signing domains stay. A version-1 body cannot verify as version 2, because the version is inside the signed body.
+- Ledger v1 records and `test/ledger-v1-vector.json` do not change.
+- A future change to `S` or to an envelope bumps all three together.
+
+### Restore digest check
+
+`restoreVerifiedState` takes an optional `stateDigest`, which is the value `exportVerifiedState` returned and the host stored with the bytes:
+
+- When it is present, restore first decodes the bytes, then recomputes the digest from them (one SHA-256) and fails with the new code `state-digest-mismatch` on a difference. Decoding first means an old row still reports `unknown-version`, not a digest mismatch.
+- When it is absent, restore behaves as before.
+- Scope: the check detects corrupted, truncated or swapped rows. It does not stop a writer who can replace both the bytes and the digest. Signatures and curve points are still not rechecked.
+- The digest covers position and `S`, not the final verification byte. Flipping that byte alone is not detected.
+
+### WebAssembly observability
+
+`ed25519WasmActive()` is also exported from `@lody/e2ee-core/protocol`, so hosts that cannot bundle `./cloudflare`, such as Convex, can report whether strict Ed25519 runs in WebAssembly. It only reads state: no backend can be injected, replaced or disabled through it.
 
 Snapshot and retained CBOR now allow one byte string up to their total budget (2 MiB and 16 MiB), because a table is one byte string. Records keep their 256-byte limit. Their array-length limit drops to the record limit of 32, since `S` has six elements.
 
@@ -138,6 +161,6 @@ Nearly all remaining bytes are random: 64 bytes of keys per device and 72-byte h
 
 ## Limits and follow-ups
 
-- No compatibility: no deployed state exists, and the previous encoding is not read.
+- No compatibility: no deployed state exists. The previous encoding is not read, and its version 1 is rejected as `unknown-version`.
 - Not changed: restored and imported views still cannot stage keys for epochs published before their restore point; reading the original publication from the ledger by position is the candidate fix.
 - Not verified: the private backend's chunked store with the new bytes. It treats them as opaque, but it must pick up this core.

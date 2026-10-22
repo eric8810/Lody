@@ -3,6 +3,7 @@ import { Point, etc, hashes, utils, verify } from '@noble/ed25519';
 import { sha512 } from '@noble/hashes/sha2.js';
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import * as Protocol from '@lody/e2ee-core/protocol';
 import {
   ED25519_KNOWN_ANSWERS,
   ed25519WasmActive,
@@ -132,6 +133,19 @@ const ACCEPT_ALL = fromHex(
 );
 
 describe('WebAssembly strict Ed25519', () => {
+  it('reports through the protocol entry whether WebAssembly is in use', () => {
+    // Node compiles from bytes, so core uses WebAssembly; the entry reads the same state.
+    expect(Protocol.ed25519WasmActive()).toBe(true);
+    resetEd25519WasmForTests();
+    setEd25519WasmEnabled(false);
+    try {
+      expect(Protocol.ed25519WasmActive()).toBe(false);
+    } finally {
+      setEd25519WasmEnabled(true);
+      resetEd25519WasmForTests();
+    }
+    expect(Protocol.ed25519WasmActive()).toBe(true);
+  });
   it('embeds and packages exactly the module its build recorded', () => {
     const bytes = Buffer.from(ED25519_WASM_BASE64, 'base64');
     expect(createHash('sha256').update(bytes).digest('hex')).toBe(ED25519_WASM_SHA256);

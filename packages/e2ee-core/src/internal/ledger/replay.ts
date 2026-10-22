@@ -308,7 +308,7 @@ export interface RetainedLedgerState {
   readonly genesis: GenesisHash;
   readonly head: RecordHash;
   readonly length: number;
-  /** The digest this position's comparison note carries; for comparison and audits, not checked on restore. */
+  /** The digest this position's comparison note carries; store it with the bytes and pass it to restore to detect corruption. */
   readonly stateDigest: RecordHash;
 }
 /** Canonical state of a genuine view, for its holder's own storage. */
@@ -327,13 +327,21 @@ export function exportVerifiedState(
     })
   );
 }
-/** Resume from bytes the caller itself exported and stored. Decodes only; no signature
- * or digest recheck. Never accept another party's bytes here: use endorsed snapshots. */
+/**
+ * Resume from bytes the caller itself exported and stored. Decodes without any
+ * signature or curve-point recheck. When `stateDigest` (the exported one) is
+ * supplied, the digest is recomputed from the bytes (one SHA-256) after they decode
+ * and a mismatch fails with `state-digest-mismatch`; this detects corrupted or
+ * swapped storage, not a forger who can rewrite both. Bytes of another format
+ * version fail with `unknown-version`: rebuild them by full replay. Never accept
+ * another party's bytes here: use endorsed snapshots.
+ */
 export function restoreVerifiedState(input: {
   readonly bytes: Uint8Array;
   readonly genesis: GenesisHash;
   readonly head: RecordHash;
   readonly length: number;
+  readonly stateDigest?: RecordHash | undefined;
 }): Result.Result<LedgerView, LedgerError> {
   return Result.map(decodeRetainedState(input.bytes, input), viewOf);
 }

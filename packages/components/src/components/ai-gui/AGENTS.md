@@ -82,10 +82,10 @@ Ownership: [README.md](README.md).
 
 ## Content Contracts
 
-- Child cancel needs subagentCancellation v1 and an exact parent turn; never
-  Stop the parent or invent terminal state. Runs also need subagentEvents v1
-  and `support.cancel`. Dialogs share turn renderers/grouping and one scroller:
-  [task rows and dialog](README.md#subagent-tasks).
+- Child cancel requires subagentCancellation/subagentEvents v1, `support.cancel`
+  and an exact parent turn; never Stop the parent or invent state. Dialogs reuse
+  parent renderers/grouping, one scroller, and read run bodies only while open:
+  [task/dialog contract](README.md#subagent-tasks).
 
 - Text roles: `@lody/ui`; prose: `conversation.readingLeading`; compact prose/code:
   subheadline, no nested `em`. Message sizes: `conversation-font-size-classes.ts`;
