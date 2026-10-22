@@ -12,8 +12,9 @@ bodies and reread loaded history around commits. This change carries shared
 semantic mutation plans through validation, Native content operations and private
 projection installation, and uses SDK-certified directory transitions. It covers
 markup, tools, finish actions and resumed state as well as ordinary text appends.
-Public ownership, durable acknowledgment and authoritative recovery remain intact;
-performance conclusions are bounded by the paired workloads below.
+Public ownership, durable acknowledgment and authoritative recovery remain intact.
+Product dispatch still requests full history; the workloads below do not establish
+bounded end-to-end long-history behavior.
 
 ## Problem and decision
 
@@ -283,6 +284,17 @@ Source review explains why the previous headline was insufficient:
   fill the page-body cache. It must not be labeled one adjacent page or evidence
   of latest-window-only memory. `readTurnOutput` also explicitly uses complete
   entries; its actual frequency and cost were not measured here.
+- A further source audit identifies a real product consumer outside this manual
+  harness: the [dispatch watcher](../../../../apps/cli/src/session/session-dispatch-watcher.ts)
+  calls `checkHistoryAndQueue` for its initial dispatch check and again for
+  requested checks while awaiting history. That method calls `backend.readHistory`.
+  The Roost backend routes it through `readAll`/`readCompleteEntries`: a cache miss
+  walks the full active branch, projects all bodies and retains a full snapshot;
+  even a cache hit clones all entries. This path therefore has whole-history
+  content work despite the bounded latest-page API. Its invocation rate and
+  end-to-end cost were not measured by this writer/reader harness. Replacing it
+  with the latest page alone would be unsafe: pending older inputs, terminal
+  repair evidence, queue ordering and RPC deduplication must remain authoritative.
 - The matching [SDK linear page reader](https://github.com/loro-dev/roost/blob/d4b07d48d53036da824372d5531f41da1fce02d2/ts/src/lody-history.ts#L1580)
   supports latest/before-cursor reads, with branch/header/metadata checks. Absolute
   `from` falls back to a complete branch directory. This distinction and the
