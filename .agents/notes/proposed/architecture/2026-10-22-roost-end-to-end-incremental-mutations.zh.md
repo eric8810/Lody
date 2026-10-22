@@ -79,3 +79,5 @@ Loro 为 1.54 MB。这不足以证明超长会话远快于 Loro，固定 SDK/Wor
 原始合成样本/哈希位于验证工作区 `incremental-mutations-20261022/linux-results.json`，
 不提交用户数据。本次草稿叠在 Lody #1811 及 Roost #25 后的对应 SDK 变更上，仍需要
 协调 Roost 发包后更新真实依赖指针；已发布的 0.2.0 SDK 不提供新增目录 API。
+
+Review: [Lody #1817](https://github.com/LodyAI/Lody/pull/1817), [Roost #26](https://github.com/loro-dev/roost/pull/26).

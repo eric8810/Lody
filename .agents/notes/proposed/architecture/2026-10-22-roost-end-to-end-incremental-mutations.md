@@ -99,3 +99,5 @@ Raw samples/hashes are local synthetic artifacts in the validation workspace's
 This PR remains a draft stacked on Lody #1811 and the matching Roost SDK change
 on Roost #25. A coordinated Roost release and real dependency pin are still needed;
 the current published 0.2.0 SDK cannot satisfy the new directory API.
+
+Review: [Lody #1817](https://github.com/LodyAI/Lody/pull/1817), [Roost #26](https://github.com/loro-dev/roost/pull/26).
