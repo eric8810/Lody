@@ -355,3 +355,7 @@ benchmark/报告以 #1821 为基线，不更改运行时 API 或依赖版本。�
 没有留下无关已跟踪文件改动。指南、中英报告和 benchmark 的局部格式检查通过。
 `pnpm run docs check` 为零错误、71 项既有提醒、零受保护主题。这些本地检查
 不替代后续 registry 发包验证。
+
+草稿审查链接：[Roost #27](https://github.com/loro-dev/roost/pull/27) 在 #26 之后
+提交共享正文运行时改动；[Lody #1830](https://github.com/LodyAI/Lody/pull/1830)
+在 #1821 之后提交本 benchmark/报告。原有依赖链分支未改，两份 PR 均未合并或发包。

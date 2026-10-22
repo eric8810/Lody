@@ -367,3 +367,8 @@ all post-test boundary gates; root `pnpm format` passes and leaves no unrelated
 tracked edits. The guide, bilingual report and benchmark pass scoped formatting.
 `pnpm run docs check` reports zero errors, 71 existing warnings and no protected
 topics. These local checks do not replace the future registry-package release gate.
+
+Draft review follow-ups: [Roost #27](https://github.com/loro-dev/roost/pull/27)
+holds the shared-body runtime change above #26; [Lody #1830](https://github.com/LodyAI/Lody/pull/1830)
+holds this benchmark/report change above #1821. Earlier stack branches remain
+unchanged. Neither PR has been merged or published as a package.
