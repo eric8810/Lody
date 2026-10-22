@@ -6,6 +6,8 @@ does not require rediscovering them. Runtime contracts remain in
 [session rules](../../apps/cli/src/session/AGENTS.md) and the matching Roost source.
 Run expensive measurements manually; timing is never a CI assertion.
 
+For the current coordinated release, use the [PR stack integration review](../notes/proposed/testing/2026-10-22-roost-pr-stack-integration.md) for exact heads, dependency order and release gates.
+
 ## Prepare once per source revision
 
 Use separate source clones with their own dependency directories for baseline
@@ -13,6 +15,14 @@ and candidate. Record both repository SHAs, uncommitted runtime diffs, Node
 version, platform/architecture, package-manager versions and loaded SDK/Native
 paths. A branch name or unchanged package version does not identify a candidate.
 Use synthetic data in fresh directories; do not point a benchmark at live state.
+
+Electron staging tests additionally require the installed split Native platform
+package. A Native source checkout with an adjacent addon can exercise CLI behavior
+but does not provide that package layout. For whole-workspace validation, prepare
+the same-revision six-platform CI artifacts with Native `release:prepare` and
+`release:check`, run `packed:smoke`, and install the generated local tarballs in a
+private consumer. Point the isolated CLI Native link to that installed package;
+record the CI source tree and selected binary hash as well as the SDK revision.
 
 Install Lody from its root with `corepack pnpm install --frozen-lockfile`, following
 the root runtime floor. Run `corepack pnpm run docs status` once at task start.
@@ -30,8 +40,11 @@ RUSTUP_TOOLCHAIN=stable corepack pnpm build
 ```
 
 Roost has no root `package.json`; running pnpm at its root can select the wrong
-pnpm version. Reuse an existing addon only when Rust, Native glue and build
-inputs are unchanged; record its hash. Use Roost's `ts` `pack:consumer` and Native
+pnpm version. Reuse an existing addon only with a recorded build-input manifest matching Rust,
+Native glue and build inputs; record its hash. An adjacent addon file or matching
+package version alone is insufficient. Check the Native capability handshake and
+one actual SDK write/reopen before starting a whole-workspace run; rebuild from
+the fixed revision if build provenance or the reply protocol is uncertain. Use Roost's `ts` `pack:consumer` and Native
 `release:prepare`/`release:check` for package verification rather than inventing
 another packaging process. Rebuilding an unchanged addon is unnecessary.
 
@@ -95,7 +108,9 @@ node --test --test-concurrency=1 --test-name-pattern='webkit' tests/lody-history
 ```
 
 Run `node --test tests/native.test.mjs` from Roost's `node/native` with the matching
-SDK built. It requires the addon; subprocess-only tests use the matching owner
+SDK built. For the complete Native/sync/release-unit suite, use `npm test`: the
+publisher fixtures require npm's executable path and do not accept a direct
+`node --test tests/release.test.mjs` invocation. It requires the addon; subprocess-only tests use the matching owner
 binary. Follow that checkout's Native README/CI for Rust and package checks.
 
 ## Choose a fixed manual benchmark
@@ -109,13 +124,13 @@ TSX_TSCONFIG_PATH=tsconfig.json node --experimental-wasm-modules --import ./node
 Replace the filename for the other `.mts` entries and use their documented
 `BENCH_*` options. Do not compare their numbers across different scopes:
 
-| Entry                                                                      | Question / fixed case                                                                                     | Durability and excluded costs                                                                                                        |
-| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| [`roost-send.mts`](../../apps/cli/benchmarks/roost-send.mts)               | First input + three follow-ups; 9 samples, 2 warmups; `BENCH_DISPATCH=1` includes activation              | Roost durable; Loro in memory. No network, Agent execution or renderer                                                               |
-| [`roost-first-input.mts`](../../apps/cli/benchmarks/roost-first-input.mts) | Cold open / first input after 0, 100, 1000 messages; same `BENCH_DIR`, `BENCH_PHASE=prepare` then measure | Roost durable; Loro snapshot restored into memory. File cache may be warm                                                            |
-| [`roost-history.mts`](../../apps/cli/benchmarks/roost-history.mts)         | Windowed reads at 100, 1000, 10000 messages; 4 KiB bodies; `BENCH_STRUCTURAL=1` adds structural work      | Production backends + ConversationView. No renderer transport, IndexedDB or paint                                                    |
-| [`roost-durable.test.ts`](../../apps/cli/benchmarks/roost-durable.test.ts) | Durable growing history and growing reply; explicit write → fresh-process reopen → paging                 | Both sides SQLite WAL/FULL and control persistence after every action; live incremental reader measured separately. No network or UI |
-| [`roost-dispatch.test.ts`](../../apps/cli/benchmarks/roost-dispatch.test.ts) | Fixed 100/1,000/10,000-message prefixes, actual watcher selection, 20 appends and fresh-process verification | Both sides SQLite WAL/FULL plus per-action control persistence; selected boundary excludes ACP execution, transport and renderer |
+| Entry                                                                        | Question / fixed case                                                                                        | Durability and excluded costs                                                                                                        |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| [`roost-send.mts`](../../apps/cli/benchmarks/roost-send.mts)                 | First input + three follow-ups; 9 samples, 2 warmups; `BENCH_DISPATCH=1` includes activation                 | Roost durable; Loro in memory. No network, Agent execution or renderer                                                               |
+| [`roost-first-input.mts`](../../apps/cli/benchmarks/roost-first-input.mts)   | Cold open / first input after 0, 100, 1000 messages; same `BENCH_DIR`, `BENCH_PHASE=prepare` then measure    | Roost durable; Loro snapshot restored into memory. File cache may be warm                                                            |
+| [`roost-history.mts`](../../apps/cli/benchmarks/roost-history.mts)           | Windowed reads at 100, 1000, 10000 messages; 4 KiB bodies; `BENCH_STRUCTURAL=1` adds structural work         | Production backends + ConversationView. No renderer transport, IndexedDB or paint                                                    |
+| [`roost-durable.test.ts`](../../apps/cli/benchmarks/roost-durable.test.ts)   | Durable growing history and growing reply; explicit write → fresh-process reopen → paging                    | Both sides SQLite WAL/FULL and control persistence after every action; live incremental reader measured separately. No network or UI |
+| [`roost-dispatch.test.ts`](../../apps/cli/benchmarks/roost-dispatch.test.ts) | Fixed 100/1,000/10,000-message prefixes, actual watcher selection, 20 appends and fresh-process verification | Both sides SQLite WAL/FULL plus per-action control persistence; selected boundary excludes ACP execution, transport and renderer     |
 
 The durable harness has an explicit opt-in config, excluded from default CI.
 Set an absolute, fresh `BENCH_DIR` outside the source checkout. Use the same
@@ -147,13 +162,37 @@ The **mixed/resumed** case sets `LONG_BENCH_MIXED=1`, `ROUNDS=10`, `CHUNKS=100`,
 `CHUNK_BYTES=1024`, `TOOL_BYTES=16384`. It includes a fragmented thinking block,
 Unicode, tool/plan changes, and a durable finish/reopen halfway through each reply.
 The `resume` metric includes that finish/open pair and both persistence barriers;
-chunk latency includes later writes to the resumed state. Its expected business
+chunk latency includes later writes to the resumed state. Role-specific creation,
+first resumed-append and notification-category statistics are separate. A combined
+text/tool/plan batch does not isolate individual tool or plan cost. Memory milestones
+record the state before diagnostic page reads; WAL/SHM bytes remain separate from
+logical DB pages. Its expected business
 content comes from the established mutating reducer, and includes the final plan.
 Use identical deterministic fixtures; do not include fixture generation, builds
 or other tests in the timed interval. Run baseline/candidate in an A–B–B–A order
 when reporting a speed change. Record the shared reducer revision used by Loro.
 Larger cases are opt-in and must state their parameters rather than silently
 replacing the standard workloads.
+
+The joint-stack comparison uses these fixed durable workloads, each followed by
+fresh-process reopen and paging:
+
+| Case                              | ROUNDS | CHUNKS | CHUNK_BYTES | TOOL_BYTES | MIXED |
+| --------------------------------- | ------ | ------ | ----------- | ---------- | ----- |
+| Short                             | 1      | 224    | 256         | 16384      | 0     |
+| Streamed history (1,000 messages) | 500    | 20     | 256         | 16384      | 0     |
+| Single 1 MiB reply                | 1      | 1024   | 1024        | 16384      | 0     |
+| Mixed/resumed                     | 10     | 100    | 1024        | 16384      | 1     |
+
+With a Loro reference, use baseline-1 → candidate-1 → Loro-1 → Loro-2 →
+candidate-2 → baseline-2. Keep a stage ledger so interrupted runs resume only
+missing stages. Retry failed measurements at most once after diagnosis, from a
+fresh copy of the closed seed, preserving both logs and the original failure.
+Do not raise resource budgets to make a failed group pass. Summarize only trials
+whose owning mutation/content checks and fresh-process verification completed;
+partial JSON is diagnostic evidence, not a successful sample. Report the actual
+number of complete trials and any missing phases. Compare matching source and
+harness hashes before resuming instead of restarting successful unrelated cases.
 
 After the three stages for both backends, verify the persisted results:
 
@@ -197,9 +236,10 @@ LONG_BENCH_DISPATCH=1 LONG_BENCH_DIR="$BENCH_DIR/roost-1000" \
 
 Close preparation completely. Copy its database directory into a new trial
 directory, then run `measure` followed by `verify`, each in a fresh process with
-the same environment except `LONG_BENCH_DIR` and `LONG_BENCH_STAGE`. Use the same
-prepared Roost seed for baseline/candidate A–B–B–A trials and a Loro seed with
-identical business content. Record the exact overlaid sources and dependency
+the same environment except `LONG_BENCH_DIR` and `LONG_BENCH_STAGE`. Reuse a closed Roost seed across baseline/candidate A–B–B–A trials only when
+their container and application formats match. Otherwise prepare each runtime
+from the identical declared input sequence and record its container version;
+use the matching Loro business content. Record the exact overlaid sources and dependency
 paths, and restore any archived research workspace in `finally`.
 
 The measurement invokes the real watcher's history/queue selection 13 times
@@ -235,6 +275,10 @@ Agent Note, linked from the PR and this guide. Raw JSON alone is insufficient.
 Use the same rows for baseline, candidate and Loro; show regressions and missing
 measurements alongside improvements. A narrow probe may mark unrelated rows
 `not measured`, but cannot establish overall or long-conversation performance.
+The user-facing chat summary includes the main latency, CPU, RSS/growth and storage
+tables directly. A linked report supplements those numbers; it must not be the
+only place showing memory or regressions. Label prior-run references separately
+from contemporaneous paired measurements.
 The [completed incremental-mutation report](../notes/proposed/architecture/2026-10-22-roost-end-to-end-incremental-mutations.md#complete-resource-report)
 is the current example, including its measurement gaps and read-path interpretation.
 
@@ -316,3 +360,24 @@ declaring the performance objective complete.
 Update this guide and its owning benchmark when a repeatable setup issue is found.
 Keep per-change conclusions in the owning Agent Note rather than creating a new
 test recipe for every PR.
+
+## Storage refactor acceptance
+
+When changing private body/log/projection representation, keep the fixed current
+candidate and published reference untouched. Use a separate matching Native
+consumer, record every Rust/build-input hash and loaded addon hash, and scope any
+dependency-link replacement to the isolated measurement checkout. Restore that
+link after checks. Do not use a global NAPI override for a Vitest/Rolldown process.
+
+In addition to the standard workloads, reconcile decoded body/log/projection
+bytes with actual SQLite pages, indexes and control DB allocation. Demonstrate
+byte-exact retained exports, bounded range/tail I/O, invalid edits without partial
+mutation, rollback fault sweeps, seals, pending replay and reopen. A storage cut
+does not establish a process RSS cut. Include RSS/growth and CPU in chat tables.
+
+Keep cold first append separate from steady appends and prepared-index selection.
+If a small tail difference repeats, report individual samples; do not discard it
+inside a faster average. The shared-body follow-up in the linked integration
+review records the user's accepted approximately 3.3 ms first-cold-append difference.
+Retain failed full-suite logs and compare unchanged baseline behavior before
+attributing an intermittent transport fixture error to the storage refactor.

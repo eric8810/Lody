@@ -3,6 +3,7 @@
 import { it, expect } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdir, readdir, readFile, writeFile, appendFile } from 'node:fs/promises';
+import { statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -138,13 +139,16 @@ it('measures durable long-conversation writes and windowed reads', async () => {
   const cpuStart = process.cpuUsage();
   const started = performance.now();
   let peakRss = rssAtStart;
-  const memory = () => {
+  const trajectory: Array<{ phase: string } & NodeJS.MemoryUsage> = [];
+  const memory = (phase?: string) => {
     const current = process.memoryUsage();
     peakRss = Math.max(peakRss, current.rss);
+    if (phase) trajectory.push({ phase, ...current });
     if (current.rss > 2 * 1024 ** 3)
       throw new Error('Isolated benchmark exceeded 2 GiB RSS budget');
     return current;
   };
+  memory('process-start');
   // Both backends use WAL + FULL. Explicit per-action persistence avoids comparing
   // Roost durable acknowledgment against a merely in-memory Loro mutation.
   const control = new Database(join(dir, 'loro.db'));
@@ -168,6 +172,7 @@ it('measures durable long-conversation writes and windowed reads', async () => {
     return createSessionBackend(doc, { historyBackend: kind });
   });
   const backend = opened.value;
+  memory('backend-open');
   const persist = async () => {
     assert.ok(doc.handle);
     await repo.persistDocNow(room, doc.handle.doc);
@@ -187,9 +192,20 @@ it('measures durable long-conversation writes and windowed reads', async () => {
       )
     );
   };
+  const fileBytes = (name: string) => {
+    try {
+      return statSync(join(dir, name)).size;
+    } catch {
+      return 0;
+    }
+  };
   const size = () => ({
     loroDbBytes: dbSize(join(dir, 'loro.db')),
     roostDbBytes: kind === 'roost' ? dbSize(join(dir, 'history.db')) : 0,
+    loroWalBytes: fileBytes('loro.db-wal'),
+    loroShmBytes: fileBytes('loro.db-shm'),
+    roostWalBytes: fileBytes('history.db-wal'),
+    roostShmBytes: fileBytes('history.db-shm'),
   });
   const page = async (from: number, to: number) => {
     const directory = await backend.readHistoryDirectory(from, to);
@@ -309,6 +325,7 @@ it('measures durable long-conversation writes and windowed reads', async () => {
             samples,
             method: reader.readOlderDirectoryPage ? 'cursor' : 'position',
             rssAtStart,
+            trajectory,
             peakRss,
             memory: memory(),
             totalMs: performance.now() - started,
@@ -324,9 +341,11 @@ it('measures durable long-conversation writes and windowed reads', async () => {
       const latest = await timer(() => page(Math.max(0, rounds * 2 - 20), rounds * 2));
       const startupToLatestMs = performance.now() - started;
       const rssAfterLatest = memory().rss;
+      memory('latest-window');
       const oldest = await timer(() => page(0, Math.min(20, rounds * 2)));
       const full = await timer(() => backend.readHistory());
       const rssAfterFullRead = memory().rss;
+      memory('after-full-materialization');
       const checked = await checkAll(full.value);
       expect(checked.fullDigest).toBe(before.fullDigest);
       const result = {
@@ -344,6 +363,7 @@ it('measures durable long-conversation writes and windowed reads', async () => {
         ...checked,
         ...size(),
         rssAtStart,
+        trajectory,
         peakRss: Math.max(peakRss, process.resourceUsage().maxRSS * 1024),
         memory: memory(),
         cpuMs: cpuMs(process.cpuUsage(cpuStart)),
@@ -358,14 +378,19 @@ it('measures durable long-conversation writes and windowed reads', async () => {
     const samples: number[] = [],
       liveChanges: number[] = [],
       appendMs: number[] = [],
+      userCreationMs: number[] = [],
+      assistantCreationMs: number[] = [],
       resumeMs: number[] = [],
+      firstResumedAppendMs: number[] = [],
       finishMs: number[] = [];
+    const categories: Record<string, number[]> = {};
     const windows: unknown[] = [];
     let checkpoint = await backend.history.getCheckpoint?.();
     const initialCheckpoint = checkpoint;
     let writeCpuMs = 0;
     let windowStart = 0;
     const report = async (completed: number) => {
+      memory(`before-window-read-${completed}`);
       const count = await backend.readHistoryCount();
       const last = await timer(() => page(Math.max(0, count - 20), count));
       const first = await timer(() => page(0, Math.min(count, 20)));
@@ -387,7 +412,13 @@ it('measures durable long-conversation writes and windowed reads', async () => {
       windowStart = samples.length;
       await appendFile(join(dir, 'progress.jsonl'), JSON.stringify(row) + '\n');
     };
-    const milestones = new Set([100, 1000, 5000, rounds * chunks]);
+    const milestones = new Set([
+      100,
+      1000,
+      5000,
+      rounds * chunks,
+      ...[64, 256, 1024].map((kib) => Math.ceil((kib * 1024) / chunkBytes)),
+    ]);
     let completed = 0;
     for (let round = 0; round < rounds; round++) {
       const user: SessionHistoryInput = {
@@ -401,15 +432,14 @@ it('measures durable long-conversation writes and windowed reads', async () => {
         fileDiff: [],
       };
       const assistant = assistantFixture(round);
-      for (const entry of [user, assistant])
-        appendMs.push(
-          (
-            await timer(async () => {
-              await backend.appendHistoryTurn(entry);
-              await persist();
-            })
-          ).ms
-        );
+      for (const entry of [user, assistant]) {
+        const measured = await timer(async () => {
+          await backend.appendHistoryTurn(entry);
+          await persist();
+        });
+        appendMs.push(measured.ms);
+        (entry.role === 'user' ? userCreationMs : assistantCreationMs).push(measured.ms);
+      }
       checkpoint = await backend.history.getCheckpoint?.();
       for (let i = 0; i < chunks; i++) {
         if (mixed && i === Math.floor(chunks / 2)) {
@@ -445,6 +475,16 @@ it('measures durable long-conversation writes and windowed reads', async () => {
           ).ms
         );
         writeCpuMs += cpuMs(process.cpuUsage(cpu));
+        const elapsed = samples.at(-1);
+        assert.ok(elapsed !== undefined);
+        const category =
+          notifications.length > 1
+            ? 'textToolPlanBatch'
+            : mixed && (i === 0 || i === Math.floor(chunks / 3))
+              ? 'textMarkup'
+              : 'text';
+        (categories[category] ??= []).push(elapsed);
+        if (mixed && i === Math.floor(chunks / 2)) firstResumedAppendMs.push(elapsed);
         completed++;
         // Incremental consumer measurement is separate from durable write time.
         if (checkpoint && backend.history.readChanges) {
@@ -476,9 +516,10 @@ it('measures durable long-conversation writes and windowed reads', async () => {
         ).ms
       );
     }
-    const rssBeforeValidation = memory().rss;
+    const rssBeforeValidation = memory('before-full-validation').rss;
     const peakRssBeforeValidation = peakRss;
     const fullRead = await timer(() => backend.readHistory());
+    memory('after-full-materialization');
     const final = await checkAll(fullRead.value);
     let catchUp;
     if (initialCheckpoint && backend.history.readChanges) {
@@ -502,7 +543,13 @@ it('measures durable long-conversation writes and windowed reads', async () => {
       ...size(),
       writes: stats(samples),
       append: stats(appendMs),
+      userCreation: stats(userCreationMs),
+      assistantCreation: stats(assistantCreationMs),
+      writeCategories: Object.fromEntries(
+        Object.entries(categories).map(([key, values]) => [key, stats(values)])
+      ),
       resume: stats(resumeMs),
+      firstResumedAppend: stats(firstResumedAppendMs),
       finish: stats(finishMs),
       liveChanges: stats(liveChanges),
       catchUp,
@@ -510,6 +557,7 @@ it('measures durable long-conversation writes and windowed reads', async () => {
       samples,
       writeCpuMs,
       rssAtStart,
+      trajectory,
       rssAfterOpen,
       rssBeforeValidation,
       peakRssBeforeValidation,
@@ -527,5 +575,9 @@ it('measures durable long-conversation writes and windowed reads', async () => {
     await repo.destroy();
     store.close();
     control.close();
+    await writeFile(
+      join(dir, `release-${stage}${sampleSuffix}.json`),
+      JSON.stringify({ phase: 'after-release', ...memory('after-release') }, null, 2)
+    );
   }
 }, 1800000);
