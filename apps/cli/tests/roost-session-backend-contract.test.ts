@@ -1214,6 +1214,91 @@ describe('Production Roost history semantics', () => {
     expect(await fixture.backend.readHistory()).toEqual(complete);
   });
 
+  it('serves certified text appends while body rereads are unavailable and reopens the same committed content', async () => {
+    let fixture = await nativeFixture();
+    const id = fixture.doc.sessionId;
+    const turnId = 'certified-append';
+    await fixture.backend.appendHistoryTurn({
+      ...nativeAssistant(turnId),
+      items: [
+        {
+          type: 'tool_call',
+          toolCallId: 'retained',
+          status: 'completed',
+          rawOutput: { text: '🙂'.repeat(1024) },
+        },
+        { type: 'text', text: 'start' },
+      ],
+    });
+    const before = await fixture.backend.readTurn(turnId);
+    const beforeCopy = structuredClone(before);
+    const reread = vi
+      .spyOn(NodeLodyHistory.prototype, 'readProjectedMessagesById')
+      .mockRejectedValue(new Error('Synthetic body reread unavailable'));
+    try {
+      for (const [i, text] of ['🙂', '漢字', '\n🚀'].entries()) {
+        await fixture.backend.applyAgentBatch({
+          targetAssistantEntryId: turnId,
+          operationIds: [`certified-${i}`],
+          contents: [{ type: 'text', text }],
+        });
+      }
+      expect(await fixture.backend.readTurn(turnId)).toMatchObject({
+        state: 'ready',
+        turn: {
+          items: [
+            beforeCopy.state === 'ready' ? beforeCopy.turn.items[0] : {},
+            { type: 'text', text: 'start🙂漢字\n🚀' },
+          ],
+        },
+      });
+      expect(before).toEqual(beforeCopy);
+    } finally {
+      reread.mockRestore();
+    }
+    await fixture.backend.applyHistoryAction({ kind: 'finish-assistant', turnId, endedAt: 42 });
+    const complete = await fixture.backend.readHistory();
+    await fixture.close();
+    fixture = await nativeFixture(id);
+    expect(await fixture.backend.readHistory()).toEqual(complete);
+  });
+
+  it('requires authoritative refresh for an uncertified commit and recovers its receipt without duplicating text', async () => {
+    const fixture = await nativeFixture();
+    const turnId = 'uncertified-append';
+    await fixture.backend.appendHistoryTurn({
+      ...nativeAssistant(turnId),
+      items: [{ type: 'text', text: 'start' }],
+    });
+    const input = {
+      targetAssistantEntryId: turnId,
+      operationIds: ['uncertified-operation'],
+      contents: [{ type: 'text' as const, text: '🙂' }],
+    };
+    const commit = RoostHistoryGeneration.prototype.commitPatches;
+    const uncertified = vi
+      .spyOn(RoostHistoryGeneration.prototype, 'commitPatches')
+      .mockImplementationOnce(async function (...args) {
+        return { ...(await commit.apply(this, args)), metadataAttached: false };
+      });
+    const reread = vi
+      .spyOn(NodeLodyHistory.prototype, 'readProjectedMessagesById')
+      .mockRejectedValue(new Error('Synthetic authoritative refresh failure'));
+    try {
+      await expect(fixture.backend.applyAgentBatch(input)).rejects.toThrow(
+        'Synthetic authoritative refresh failure'
+      );
+    } finally {
+      uncertified.mockRestore();
+      reread.mockRestore();
+    }
+    await fixture.backend.applyAgentBatch(input);
+    expect(await fixture.backend.readTurn(turnId)).toMatchObject({
+      state: 'ready',
+      turn: { items: [{ type: 'text', text: 'start🙂' }] },
+    });
+  });
+
   it('transmits native streaming edits without resending an unchanged large tool result', async () => {
     const fixture = await coldHistoryHandlerFixture(1);
     const id = [...fixture.docs.keys()][0]!;

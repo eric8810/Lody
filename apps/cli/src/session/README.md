@@ -693,6 +693,12 @@ executes this and observation programs through the same FileLocks runtime; a fai
 metadata scratch release retains its path and bounded retry capability. Bare
 clone/fetch, full mutations and long-lived GC still require their own native owners.
 
+For a text-only append to an installed unsealed primary, the owner stages private
+SDK/application snapshots from the planned native paths. It may install them only
+when the atomic commit certifies the complete event interval and the window is
+unchanged. Other patches, uncertain replies and external changes retain the
+authoritative refresh path. Checkpoint publication still verifies ownership.
+
 ## Conversation-tree stop
 
 The related-conversations action persists `collaborationStopped` on the creation tree.

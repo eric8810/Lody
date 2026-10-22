@@ -189,3 +189,53 @@ Initial setup attempts using an incompatible addon, a workspace-wide override,
 or an incomplete private package are not passing verification. The parent still
 requires a coordinated published Native release; candidate-linked local checks
 do not establish registry CI success.
+
+## Certified local append implementation plan
+
+Phase timings on the first-step source isolate post-commit refresh as 7.01 s of
+9.73 s for 500 x 1 KiB appends; the actual atomic Native commits total 0.43 s.
+These local diagnostic timings include nested phases and must not be added.
+The next implementation stages only text-appending patches against the exact
+installed unsealed primary snapshot. It clones private SDK and application
+content, applies the already planned append paths, and uses the usual logical
+projection and permission overlay. It installs those snapshots only after a
+successful Native commit certifies its event interval and the installed window
+has not changed. Seals, state records, other operations, uncertain replies,
+uncertified intervals and changed windows keep authoritative refresh. No new
+interpreter for general Roost edits, storage format or lifecycle is introduced.
+Verification must cover the real durable boundary, caller isolation, stale
+snapshots, foreign/pending events, retries and full reopened equality before
+making a performance claim. New-message window hydration remains a distinct
+measured problem.
+
+
+## Certified append measurements
+
+Two before/two after Linux runs compare this cut with PR #1804 using the same
+v9 addon and SDK. Runs alternate baseline, candidate, candidate, baseline; Loro
+is a separate same-content reference. Both workloads retain the 16 KiB tool
+output and use SQLite WAL/FULL plus persistence per action. Median single-reply
+append p95 is 105.77 -> 37.64 ms (Loro 15.30 ms), total append time 63.41 ->
+29.18 s, CPU 56.22 -> 21.23 s. Many-message append p95 is 32.45 -> 26.20 ms
+(Loro 4.00 ms), total 50.34 -> 42.80 s, CPU 30.83 -> 24.49 s. The reduction
+helps growing replies but does not meet the performance goal or fix the window
+reload: new-message p95 remains 346.22 -> 339.16 ms (Loro 4.79 ms). Do not infer
+a gain from the two-sample initial-message metric for the single-reply case.
+
+All 30 write/reopen/paging stages pass, full reopened digests match, canonical
+business-content digests match Loro, receipt replays preserve exact content, and
+18 closed SQLite databases pass quick_check. The research sources are restored
+and the temporary harness removed. Small disk differences are not storage gains;
+worker RSS varies and is not attributed to this cut. Only named-import formatting differs from the measured source; the patch helper
+is byte-identical. Raw measurements, hashes and checks
+are in the committed-projections research artifacts. Full pnpm check, root format,
+CLI typecheck and docs check (0 errors / 71 warnings) pass. The four owning Native
+suites include the two new certificate/body-read failure regressions (109 cases).
+
+A separate current-source diagnostic traces 100 small text appends. Per append it
+observes 39 indexRead calls, 13 eventsAfter calls, about four index scans and five
+write transactions: content+receipt, binding cursor, two publication-progress
+commits and goal projection. This diagnostic is not an isolated Linux before/after
+result, and overlapping request timings must not be added to wall time. It exposes
+SDK catch-up and derived-progress overhead as the next target; this PR does not
+skip those correctness paths or claim the growing-body refresh was the only cost.

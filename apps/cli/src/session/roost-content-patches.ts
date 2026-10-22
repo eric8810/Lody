@@ -44,6 +44,51 @@ export function decodeAgentReceipt(value: Uint8Array): { digest: string } {
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
+/** Stage only appendText against an owned snapshot; Native still validates the edit. */
+export function stageRoostTextAppends<T>(content: T, ops: readonly ContentOp[]): T | undefined {
+  if (
+    !ops.length ||
+    ops.some(
+      (op) =>
+        op.kind !== 'appendText' ||
+        op.path.length < 2 ||
+        !('key' in op.path[0]!) ||
+        op.path[0].key !== 'content'
+    )
+  )
+    return undefined;
+  const next = structuredClone(content);
+  for (const op of ops) {
+    if (op.kind !== 'appendText') return undefined;
+    let parent: unknown = next;
+    for (let i = 1; i < op.path.length; i++) {
+      const part = op.path[i]!;
+      const key = 'key' in part ? part.key : Number(part.index);
+      let value: unknown;
+      if (parent instanceof Map && 'key' in part && parent.has(key)) value = parent.get(key);
+      else if (
+        ((Array.isArray(parent) && 'index' in part && part.index < BigInt(parent.length)) ||
+          (object(parent) && !(parent instanceof Map) && 'key' in part)) &&
+        Object.hasOwn(parent, key)
+      )
+        value = Reflect.get(parent, key);
+      else return undefined;
+      if (i === op.path.length - 1) {
+        if (typeof value !== 'string') return undefined;
+        if (parent instanceof Map) parent.set(key, value + op.text);
+        else
+          Object.defineProperty(parent, key, {
+            value: value + op.text,
+            enumerable: true,
+            configurable: true,
+            writable: true,
+          });
+      } else parent = value;
+    }
+  }
+  return next;
+}
+
 /** Diff validated content, preserving unchanged subtrees and native scalar text offsets. */
 export function roostContentPatches(before: unknown, after: unknown): ContentOp[] {
   const ops: ContentOp[] = [];

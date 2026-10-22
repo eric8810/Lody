@@ -81,7 +81,11 @@ import {
 import { registerSessionBackendFactory } from './session-backend';
 import { RoostHistoryGeneration } from './roost-history-generation';
 import { createRoostHistoryChanges } from './roost-history-changes';
-import { roostContentPatches, agentReceiptPut } from './roost-content-patches';
+import {
+  roostContentPatches,
+  agentReceiptPut,
+  stageRoostTextAppends,
+} from './roost-content-patches';
 import { createRoostMessageState, projectRoostMessageState } from './roost-message-state';
 import { reportRoostHistoryFailure } from './roost-history-diagnostics';
 import { loadRoostOwnerSeedLegacy } from './roost-writer-identity';
@@ -323,9 +327,9 @@ const createNodeServicesForLease = async (
     return promise;
   };
   const projectMessages = async (
-    messages: readonly HistoryProjectedMessage[]
+    messages: readonly HistoryProjectedMessage[],
+    decoded = adaptRoostProjectedMessages(messages)
   ): Promise<SessionEntry[]> => {
-    const decoded = adaptRoostProjectedMessages(messages);
     const projected = projectRoostSegments(decoded) as SessionEntry[];
     const primaryContent = new Map(
       decoded
@@ -1356,7 +1360,10 @@ const createNodeServicesForLease = async (
 
   // A content/state transaction does not change branch membership. Refresh only
   // affected primary bodies; older hydrated bodies are invalidated on demand.
-  const refreshTurnProjections = async (changed: readonly string[]): Promise<void> => {
+  const refreshTurnProjections = async (
+    changed: readonly string[],
+    staged?: ReadonlyMap<string, { message: HistoryProjectedMessage; row: RoostHistorySegment }>
+  ): Promise<void> => {
     if (!changed.length) return;
     const ids = new Set(changed);
     for (const key of stateCache.keys()) {
@@ -1373,12 +1380,18 @@ const createNodeServicesForLease = async (
     const primaryIds = branch.messages
       .filter((row) => row.segmentId === 'primary' && ids.has(row.businessId))
       .map((row) => row.turnId);
-    const fresh = await roostHistory.readProjectedMessagesById(primaryIds);
+    const fresh = staged
+      ? primaryIds.map((id) => staged.get(bytesHex(id))!.message)
+      : await roostHistory.readProjectedMessagesById(primaryIds);
     if (fresh.length !== primaryIds.length || fresh.some((row) => !row || !ids.has(row.businessId)))
       throw new Error('Roost changed history is incomplete');
     const byPhysicalId = new Map(fresh.map((row) => [bytesHex(row.turnId), row]));
     const messages = branch.messages.map((row) => byPhysicalId.get(bytesHex(row.turnId)) ?? row);
-    const projected = await projectMessages(messages.filter((row) => ids.has(row.businessId)));
+    const changedMessages = messages.filter((row) => ids.has(row.businessId));
+    const decoded = changedMessages.map(
+      (message) => staged?.get(bytesHex(message.turnId))?.row ?? adaptRoostProjectedMessage(message)
+    );
+    const projected = await projectMessages(changedMessages, decoded);
     for (const entry of projected) {
       const position = positionById.get(entry.id);
       if (position === undefined) throw new Error('Roost changed history has no position');
@@ -1387,7 +1400,10 @@ const createNodeServicesForLease = async (
     }
     activeBranch = { ...branch, messages };
     rows = messages.map(
-      (message) => retainedRows.get(message) ?? adaptRoostProjectedMessage(message)
+      (message) =>
+        retainedRows.get(message) ??
+        staged?.get(bytesHex(message.turnId))?.row ??
+        adaptRoostProjectedMessage(message)
     );
     rebuildSegmentIndexes(messages);
     readGeneration += 1;
@@ -1481,8 +1497,56 @@ const createNodeServicesForLease = async (
       }
     if (canPatch && patchWrites.length <= 64) {
       if (!patchWrites.length && !patchReceipts.length) return false;
-      await historyGeneration.commitPatches(patchWrites, patchReceipts, operationCursor, patchIds);
-      await refreshTurnProjections(patchIds);
+      const branch = currentBranch();
+      const generation = readGeneration;
+      const staged = new Map<
+        string,
+        { message: HistoryProjectedMessage; row: RoostHistorySegment }
+      >();
+      for (const write of patchWrites) {
+        if (write.kind !== 'edit') break;
+        const index = branch.messages.findIndex(
+          (message) => bytesHex(message.turnId) === bytesHex(write.turnId)
+        );
+        const message = branch.messages[index];
+        const row = rows[index];
+        if (
+          !message ||
+          !row ||
+          message.segmentId !== 'primary' ||
+          message.sealed ||
+          message.nextSeq !== write.expectedNextSeq ||
+          branch.messages.some(
+            (other) => other.businessId === message.businessId && other !== message
+          ) ||
+          (await readState(message))
+        )
+          break;
+        const content = stageRoostTextAppends(message.content, write.ops);
+        const decoded = stageRoostTextAppends(row.content, write.ops);
+        if (content === undefined || decoded === undefined) break;
+        const nextSeq = message.nextSeq + BigInt(write.ops.length);
+        staged.set(bytesHex(write.turnId), {
+          message: { ...message, content, nextSeq },
+          row: { ...row, content: decoded, nextSeq },
+        });
+      }
+      const commit = await historyGeneration.commitPatches(
+        patchWrites,
+        patchReceipts,
+        operationCursor,
+        patchIds
+      );
+      await refreshTurnProjections(
+        patchIds,
+        commit.metadataAttached &&
+          commit.before === operationCursor &&
+          currentBranch() === branch &&
+          readGeneration === generation &&
+          staged.size === patchWrites.length
+          ? staged
+          : undefined
+      );
       for (const entry of prepared) rememberGoal(entry, positions.get(entry.id));
       if (patchIds.length) recordChange({ kind: 'changed', businessIds: patchIds });
       if (patchIds.length) pendingModelSummary = true;

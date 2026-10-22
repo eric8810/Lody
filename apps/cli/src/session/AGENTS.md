@@ -2,12 +2,12 @@
 
 `CLAUDE.md` links here; edit this file.
 
-[Module contracts](README.md); [worktree rules](worktree/AGENTS.md).
+[Docs](README.md); [worktree rules](worktree/AGENTS.md).
 
 ## Authorization and identity
 
 - Authorize target machines via injected access with the source CLI token. MCP delegation
-  verifies the frozen Turn requester; Operation rules:
+  verifies the frozen Turn requester; Rules:
   [../mcp/AGENTS.md](../mcp/AGENTS.md).
 - Never send an untrusted requester through workspace Machine RPC: it authenticates no member identity.
 - Live status is a target-daemon Machine RPC read; durable metadata never substitutes for it.
@@ -69,11 +69,12 @@
 
 ## Lifecycle
 
-- [Roost](README.md#roost-history-paging): check owner/backend; no keyring,
-  rotation/fallback, removed-history revival, uncertain steer replay or signed-log/receipt pruning.
-  Atomic edits+digests+metadata; agent v2/renderer v3 only; no uncertain SDK retry.
-  Keep input/permission/branch recovery SDK-owned. Local causes; RPC stage/code/ID.
-- `Session.createAgent` gates each ACP spawn; failed spawns reject JSON-RPC. Terminals use protocol argv (`sh -c` for unsplit commands only). Managed Codex reused-refresh startup
+- [Roost](README.md#roost-history-paging): owner/backend gate; no keyring,
+  rotation/fallback, removed-history revival, uncertain steer replay, log/receipt pruning.
+  Atomic edits+digests+metadata; agent v2/renderer v3 only; no uncertain retries.
+  SDK recovery: input/permission/branch; local causes; RPC stage/code/ID.
+  Certify Native commits before caching text; else reread.
+- `Session.createAgent` gates each ACP spawn; failures reject JSON-RPC. Terminals use protocol argv (`sh -c` for unsplit commands only). Managed Codex reused-refresh startup
   retries once after process cleanup, delay, and live Provider recheck; other auth errors do not.
 - Child tabs reuse parent workspace. No per-session paths in `MachineMeta`:
   machines publish `['dotlodyPath']`; frontends derive them.
