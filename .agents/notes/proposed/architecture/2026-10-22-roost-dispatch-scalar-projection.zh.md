@@ -121,6 +121,22 @@ Loro 标量目录方案的 76 倍速度。调度后候选 RSS 约 414 MiB，基�
 
 #### 选择与读取
 
+**恢复口径。** Loro 的 199.41 ms 是文档已加载后的热调度。10,000 条的测量进程中，
+Loro 后端打开实际为 **6,469.78 ms**，选择前 RSS 已由 **299.7 增至
+1,183.9 MiB**；候选 Roost 打开为 **676.16–801.58 ms**，打开后 RSS 为
+**413.6–414.7 MiB**。因此约 76 倍只适用于热调度；此处打开阶段的对照约为
+8–10 倍，两者都不代表完整会话恢复。另一个 Loro 校验进程打开随后更新过的文档
+用了 4,301.34 ms，这是不同阶段，不是第二次相同 seed 的测量 trial。
+
+Open 计时包含 `openPersistedDoc`、`composeSessionData` 和
+`createSessionBackend`，没有调用 `SessionDocument.init`，也没有等待
+`backend.initialize`、传输加入/同步、ACP 会话恢复或重放、ConversationView
+构建、React 渲染或首个可见输出。历史前缀通过一次 `applyHistoryImport` 写入最终
+消息，没有按多次流式修改生成每条历史回复。这仍然产生 Loro 操作，但没有复现真实
+对话的编辑序列；最终业务内容相同，不代表操作历史或恢复成本相同。本实验不能证明
+Loro 在这些未测场景下一定更慢。写入表中的 `resume` 只计
+`openAssistantTurn` 加控制文档持久化，不是长会话恢复。
+
 | Prefix / backend | Open ms | First dispatch ms | Warm dispatch ms |
 | --- | --- | --- | --- |
 | 100 / baseline | 652.00/652.00/652.00 | 322.74/322.74/322.74 | 4.25/9.40/12.33 |

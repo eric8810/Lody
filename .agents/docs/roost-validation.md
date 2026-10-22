@@ -207,8 +207,15 @@ retry must not duplicate output. Memory samples precede full export and follow
 each phase; full-content verification and a fresh-process digest check run after
 timing. SQLite `quick_check` remains an external, post-close check.
 
-Do not describe this as full agent-response latency, a network test, a growing
-1 MiB reply test, or the cost of a cold OS page cache. The
+`openMs` covers persisted-document loading, composition and backend creation;
+it stops before backend initialization, transport sync, agent restoration and
+visible UI. `warmDispatch` follows that loading, and the write metric `resume`
+only reopens an assistant history entry. Neither is long-session recovery.
+The prefix imports final turns rather than generating their full streaming edit
+sequences: matching final content does not match CRDT operation history.
+
+Do not describe this as full session recovery, full agent-response latency, a
+network test, a growing 1 MiB reply test, or the cost of a cold OS page cache. The
 [dispatch report](../notes/proposed/architecture/2026-10-22-roost-dispatch-scalar-projection.md#validation-and-limits)
 records results and missing categories.
 

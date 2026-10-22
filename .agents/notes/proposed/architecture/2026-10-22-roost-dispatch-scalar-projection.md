@@ -153,6 +153,28 @@ so the experiment does not prove that maintaining the index has zero overhead.
 
 #### Selection and reads
 
+**Recovery interpretation.** The 199.41 ms Loro value is warm selection after
+the document has already been loaded. In the 10,000-message measurement process,
+Loro backend open took **6,469.78 ms**, with RSS growing from **299.7 to
+1,183.9 MiB** before selection; candidate Roost open took **676.16–801.58 ms**,
+with opened RSS **413.6–414.7 MiB**. Thus the approximately 76× figure applies
+only to warm dispatch. The open-stage comparison here is approximately 8–10×,
+and neither figure measures complete session recovery. The separate Loro
+verification process opened its subsequently updated document in 4,301.34 ms;
+that is a different stage, not a second identical-seed measurement trial.
+
+The open timer covers `openPersistedDoc`, `composeSessionData` and
+`createSessionBackend`. It does not run `SessionDocument.init` or await
+`backend.initialize`, transport join/sync, ACP session restoration or replay,
+ConversationView construction, React rendering or first visible output. The
+historical prefix is built by one `applyHistoryImport` of final turns; it does
+not generate each historical response through repeated streaming edits. This
+still creates Loro operations, but does not reproduce a real conversation's
+edit sequence. Equal final business content does not establish equal operation
+history or recovery cost. No claim that Loro must be slower for those unmeasured
+cases follows from this experiment. In the write table, `resume` times only
+`openAssistantTurn` plus control persistence, not long-session restoration.
+
 | Prefix / backend | Open ms | First dispatch ms | Warm dispatch ms |
 | --- | --- | --- | --- |
 | 100 / baseline | 652.00/652.00/652.00 | 322.74/322.74/322.74 | 4.25/9.40/12.33 |
