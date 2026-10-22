@@ -73,11 +73,7 @@ import {
   createRoostSessionBackendFactory,
   type RoostSessionBackendServices,
 } from './roost-session-backend';
-import {
-  adaptRoostProjectedMessage,
-  adaptRoostProjectedMessages,
-  encodeRoostContent,
-} from './roost-history-port';
+import { adaptRoostProjectedMessage, encodeRoostContent } from './roost-history-port';
 import { registerSessionBackendFactory } from './session-backend';
 import { RoostHistoryGeneration } from './roost-history-generation';
 import { createRoostHistoryChanges } from './roost-history-changes';
@@ -328,7 +324,7 @@ const createNodeServicesForLease = async (
   };
   const projectMessages = async (
     messages: readonly HistoryProjectedMessage[],
-    decoded = adaptRoostProjectedMessages(messages)
+    decoded: readonly RoostHistorySegment[] = decodeMessages(messages)
   ): Promise<SessionEntry[]> => {
     const projected = projectRoostSegments(decoded) as SessionEntry[];
     const primaryContent = new Map(
@@ -521,6 +517,33 @@ const createNodeServicesForLease = async (
     return toApplicationJson(message.content);
   };
 
+  const decodeMessages = (
+    messages: readonly HistoryProjectedMessage[]
+  ): readonly RoostHistorySegment[] =>
+    messages.map((message) => {
+      const known =
+        windowHistory === roostHistory ? projectedByIdentity.get(identityKey(message)) : undefined;
+      if (
+        message.sealed &&
+        known?.sealed &&
+        message.sealedHash &&
+        known.sealedHash &&
+        message.nextSeq === known.nextSeq &&
+        bytesHex(message.turnId) === bytesHex(known.turnId) &&
+        bytesHex(message.sealedHash) === bytesHex(known.sealedHash) &&
+        message.parents.length === known.parents.length &&
+        message.parents.every(
+          (parent, i) =>
+            bytesHex(parent.id) === bytesHex(known.parents[i]!.id) &&
+            bytesHex(parent.hash) === bytesHex(known.parents[i]!.hash)
+        )
+      ) {
+        const row = rows.find((candidate) => identityKey(candidate) === identityKey(message));
+        if (row) return row;
+      }
+      return adaptRoostProjectedMessage(message);
+    });
+
   const changeBetween = (
     previous: readonly RoostHistorySegment[],
     next: readonly RoostHistorySegment[]
@@ -569,11 +592,14 @@ const createNodeServicesForLease = async (
     }
   };
 
-  const projectBranchPage = async (branch: ActiveBranchPageRead): Promise<SessionEntry[]> => {
+  const projectBranchPage = async (
+    branch: ActiveBranchPageRead,
+    decoded = decodeMessages(branch.messages)
+  ): Promise<SessionEntry[]> => {
     if (!branch.complete) {
       throw new Error(`Roost active branch for ${viewId} is incomplete`);
     }
-    const projected = await projectMessages(branch.messages);
+    const projected = await projectMessages(branch.messages, decoded);
     const primaryIds = branch.messages
       .filter((message) => message.segmentId === 'primary')
       .map((message) => message.businessId);
@@ -613,6 +639,7 @@ const createNodeServicesForLease = async (
   const installBranchWindow = (
     branch: ActiveBranchPageRead,
     projected: SessionEntry[],
+    decoded: readonly RoostHistorySegment[],
     notify = false
   ): void => {
     const previous = rows;
@@ -621,7 +648,7 @@ const createNodeServicesForLease = async (
     windowHistory = roostHistory;
     loadedStartPosition = branch.startPosition;
     totalHistoryCount = branch.totalCount;
-    rows = adaptRoostProjectedMessages(branch.messages).map((row) => ({ ...row }));
+    rows = decoded.map((row) => ({ ...row }));
     rebuildSegmentIndexes(branch.messages);
     rebuildLogicalProjection(projected);
     readGeneration += 1;
@@ -670,8 +697,8 @@ const createNodeServicesForLease = async (
       limit: branchPageSize,
     });
     if (disposed) throw new Error('Roost session backend is disposed');
-    const projected = await projectBranchPage(nextBranch);
-    const nextRows = adaptRoostProjectedMessages(nextBranch.messages);
+    const nextRows = decodeMessages(nextBranch.messages);
+    const projected = await projectBranchPage(nextBranch, nextRows);
     let change =
       previous.length === 0 && nextRows.length === 0
         ? undefined
@@ -684,7 +711,7 @@ const createNodeServicesForLease = async (
       }
       if (changed.size) change = { kind: 'changed', businessIds: [...changed] };
     }
-    installBranchWindow(nextBranch, projected);
+    installBranchWindow(nextBranch, projected, nextRows);
     knownCursor = cursor;
     goalCoveredStart = totalHistoryCount;
     goalProjection =
@@ -732,15 +759,15 @@ const createNodeServicesForLease = async (
       Buffer.from(row.turnId).equals(Buffer.from(turnId))
     );
     const position = known ? positionById.get(known.businessId) : undefined;
-    // This identity already belongs to the active window. Editing its unsealed
-    // primary cannot change membership; hydrate just that physical message.
+    // This primary already belongs to the window. Its edit/seal does not add a
+    // member. Publication still reloads if the event interval includes other work.
     if (!mutation && known?.segmentId === 'primary' && !known.sealed && position !== undefined) {
       const [fresh] = await roostHistory.readProjectedMessagesById([turnId]);
       if (disposed) throw new Error('Roost session backend is disposed');
       if (!fresh || identityKey(fresh) !== identityKey(known)) {
         throw new Error(`Roost changed message ${known.businessId} is unavailable`);
       }
-      if (generation === readGeneration && activeBranch === branch && !fresh.sealed) {
+      if (generation === readGeneration && activeBranch === branch) {
         const segment = adaptRoostProjectedMessage(fresh);
         const [entry] = await projectMessages([fresh]);
         if (!entry) throw new Error(`Roost changed message ${known.businessId} has no projection`);
@@ -768,7 +795,7 @@ const createNodeServicesForLease = async (
       [...projectedByIdentity.values()].find((row) =>
         Buffer.from(row.turnId).equals(Buffer.from(turnId))
       )?.businessId;
-    // Re-read the bounded latest window after membership/seal changes. This keeps a
+    // Re-read the bounded latest window after membership or uncertain changes. This keeps a
     // sealed successor for an older business id from being appended to the
     // current renderer window as if it were a new logical turn, and keeps the
     // owner window bounded when new turns are appended.

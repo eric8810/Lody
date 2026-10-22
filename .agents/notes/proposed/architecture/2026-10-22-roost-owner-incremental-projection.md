@@ -2,7 +2,7 @@
 
 Status: proposed
 Translation: current
-PR: https://github.com/LodyAI/Lody/pull/1804
+PRs: https://github.com/LodyAI/Lody/pull/1804, https://github.com/LodyAI/Lody/pull/1806
 
 [中文](2026-10-22-roost-owner-incremental-projection.zh.md)
 
@@ -14,8 +14,9 @@ repeated JSON encoding/decoding, including conversions of unchanged window rows
 and body conversion merely to build an identity index. The first implementation
 removes redundant conversions while retaining authoritative reads, and its four
 real-Native regression suites pass 107 cases with both v8 and v9 candidates.
-Installing committed deltas and incrementally advancing the tail window remain
-proposals; this first step does not establish the long-conversation performance goal.
+A second implementation installs certified local text appends; the current cut
+reuses unchanged sealed decoded bodies within one SDK handle. SDK pagination still
+owns membership and cursors. These cuts do not yet establish the performance goal.
 
 ## Evidence and scope
 
@@ -239,3 +240,73 @@ commits and goal projection. This diagnostic is not an isolated Linux before/aft
 result, and overlapping request timings must not be added to wall time. It exposes
 SDK catch-up and derived-progress overhead as the next target; this PR does not
 skip those correctness paths or claim the growing-body refresh was the only cost.
+
+
+## Sealed decoded window reuse
+
+The consumer reuses private decoded primary/segment bodies only within the same
+SDK handle and after matching business/segment identity, physical Turn ID, nextSeq,
+seal hash and every parent edge. The SDK still supplies branch state, logical
+count, completeness and cursors; Lody does not synthesize a tail append. Changed
+seals, unsealed rows and new generations decode normally. State and permission
+lookups are invalidated/reapplied as before, so caching an immutable primary
+cannot suppress a later state correction. Decode each new window once for its
+logical projection, comparisons and installed private rows. The SDK's separately
+bounded sealed body reuse is [Roost #23](https://github.com/loro-dev/roost/pull/23).
+The next SDK cut reduces duplicate catch-up work, separately from body reuse.
+
+The original SDK and candidate SDK both pass CLI typecheck and the four owning
+real-Native suites (109 cases before the final SDK-handle equality guard; final
+verification is pending). No Effect lifecycle migration, new dependency version,
+wire/storage layout or compatibility reader is introduced. Performance comparison
+will separate the already measured certified-append cut from this combined SDK
+and consumer change; no cache benefit is claimed before that measurement.
+
+
+### Sealing an installed primary
+
+The existing single-primary refresh rejected a successfully read sealed result
+and reloaded the whole latest window. This is unnecessary when the identity is
+already installed and no branch mutation is being handled: sealing changes its
+sequence/hash, not branch membership. Retain the same generation/window fence
+and install the SDK's authoritative single-row result, including its sealed hash.
+The enclosing publication still verifies every event and reloads on foreign or
+uncertain work. Membership changes and missing/outside-window rows keep full
+SDK-owned paging. Tests seal while window rereads are unavailable, append a child
+using the signed parent, reopen exactly, and interleave a peer branch append during
+the seal. Both focused cases pass; final combined verification is pending.
+
+
+### Final sealed-reuse validation and Linux attribution
+
+Root `pnpm format` and full `pnpm check` pass after the seal guard change and its
+behavioral tests. The CLI suite reports 330 files passed / one skipped, including
+111 cases across the four owning Roost suites; docs check has zero errors and
+71 existing warnings. Final measured seal-source SHA-256 exactly matches this
+PR's runtime source. No Native/SDK package version is published or deployed.
+
+Same-content durable Linux runs (WAL/FULL, per-action acknowledgment, two Roost
+trials per configuration, 100 rounds / 200 messages / 2000 appends of 256 bytes,
+16 KiB synthetic tool result per assistant) isolate the combined cuts:
+
+| Configuration | Append p95 ms | New message p95 ms | Append CPU seconds |
+| --- | ---: | ---: | ---: |
+| #1804 / original SDK | 29.87 | 347.95 | 30.78 |
+| Certified text + decoded reuse + SDK body cache only | 26.88 | 148.27 | 25.56 |
+| Above + SDK settled/progress shortcut | 21.98 | 137.21 | 17.25 |
+| Above + final single-primary seal refresh | 23.43 | 115.89 | 17.09 |
+| Durable same-content Loro reference (one trial) | 4.85 | 6.03 | 2.43 |
+
+The seal cut improves the measured message boundary, not steady append p95; the
+latter varies between trials. Do not attribute all combined gains to this Lody
+PR. The main matrix's single 1000 x 1 KiB reply improves append p95 from 112.41 to
+33.97 ms, vs Loro 14.86 ms; the final seal ablation only reruns the many-message
+case. Full business-content digests match Loro, reopen digests match writes, and
+all 26 post-close SQLite quick checks across main/ablation pass. Main candidate
+many-message reopen/paging remain worse than Loro (0.970s tail / 0.684s paging vs
+0.467s / 0.041s); the long-conversation objective is not complete. Artifacts and
+synthetic harness stay outside Git in `tail-and-catchup-20261022` research output.
+
+The newly approved next cut is a separate Native conditional derived-index API
+and consumer PR. It must reduce the remaining four transactions without weakening
+durability, pending-event processing or publication dependencies.

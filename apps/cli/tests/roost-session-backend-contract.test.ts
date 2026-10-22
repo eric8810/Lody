@@ -1299,6 +1299,74 @@ describe('Production Roost history semantics', () => {
     });
   });
 
+  it('seals an installed primary without rereading the window and preserves its signed parent for the next turn', async () => {
+    let fixture = await nativeFixture();
+    const id = fixture.doc.sessionId;
+    const finish = NodeLodyHistory.prototype.finish;
+    let restoreWindow: (() => void) | undefined;
+    const seal = vi.spyOn(NodeLodyHistory.prototype, 'finish').mockImplementationOnce(async function (
+      ...args
+    ) {
+      await finish.apply(this, args);
+      const blocked = vi
+        .spyOn(NodeLodyHistory.prototype, 'readActiveBranchPage')
+        .mockRejectedValue(new Error('Synthetic window reread unavailable'));
+      restoreWindow = () => blocked.mockRestore();
+    });
+    try {
+      await fixture.backend.appendHistoryTurn({
+        ...nativeAssistant('single-seal'),
+        finished: true,
+        items: [{ type: 'text', text: 'sealed 🙂' }],
+      });
+    } finally {
+      restoreWindow?.();
+      seal.mockRestore();
+    }
+    await fixture.backend.appendHistoryTurn(nativeUser('after-single-seal'));
+    const complete = await fixture.backend.readHistory();
+    expect(complete.map((entry) => entry.id)).toEqual(['single-seal', 'after-single-seal']);
+    expect(complete[0]).toMatchObject({
+      finished: true,
+      items: [{ type: 'text', text: 'sealed 🙂' }],
+    });
+    await fixture.close();
+    fixture = await nativeFixture(id);
+    expect(await fixture.backend.readHistory()).toEqual(complete);
+  });
+
+  it('reloads foreign branch work that arrives while sealing an installed primary', async () => {
+    const fixture = await nativeFixture();
+    const peer = await nativeFixture(fixture.doc.sessionId);
+    const finish = NodeLodyHistory.prototype.finish;
+    const seal = vi.spyOn(NodeLodyHistory.prototype, 'finish').mockImplementationOnce(async function (
+      ...args
+    ) {
+      await finish.apply(this, args);
+      await peer.backend.appendHistoryTurn(nativeUser('foreign-after-seal'));
+    });
+    try {
+      await fixture.backend.appendHistoryTurn({
+        ...nativeAssistant('local-seal'),
+        finished: true,
+        items: [{ type: 'text', text: 'local content' }],
+      });
+      expect((await fixture.backend.readHistory()).map((entry) => entry.id)).toEqual([
+        'local-seal',
+        'foreign-after-seal',
+      ]);
+      await fixture.backend.appendHistoryTurn(nativeAssistant('local-after-foreign'));
+      expect((await fixture.backend.readHistory()).map((entry) => entry.id)).toEqual([
+        'local-seal',
+        'foreign-after-seal',
+        'local-after-foreign',
+      ]);
+    } finally {
+      seal.mockRestore();
+      await peer.close();
+    }
+  });
+
   it('transmits native streaming edits without resending an unchanged large tool result', async () => {
     const fixture = await coldHistoryHandlerFixture(1);
     const id = [...fixture.docs.keys()][0]!;

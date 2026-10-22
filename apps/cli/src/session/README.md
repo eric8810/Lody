@@ -697,7 +697,13 @@ For a text-only append to an installed unsealed primary, the owner stages privat
 SDK/application snapshots from the planned native paths. It may install them only
 when the atomic commit certifies the complete event interval and the window is
 unchanged. Other patches, uncertain replies and external changes retain the
-authoritative refresh path. Checkpoint publication still verifies ownership.
+authoritative refresh path. Checkpoint publication still verifies ownership. Sealed window rows may reuse
+private decoded content only within the same SDK handle, with the complete
+physical identity, sequence, seal hash and parents unchanged. SDK-owned branch
+selection and current state/permission overlays still run. New windows share
+one decode between projection and installation. Sealing an installed primary
+refreshes that row's authoritative sequence/hash; publication still reloads the
+branch if its event interval includes foreign or unaccounted work.
 
 ## Conversation-tree stop
 
