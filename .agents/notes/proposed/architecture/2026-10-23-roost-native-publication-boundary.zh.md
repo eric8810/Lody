@@ -52,7 +52,7 @@ RPC 页、正文和 head 必须来自同一次稳定观察。跨 generation 使�
 
 ## 订阅不能阻塞写入
 
-Rust 核心已有提交后合并通知，但 Native 尚未暴露非阻塞订阅。其普通 Worker 请求通道是串行的；若把 Native 长等待塞进该通道，会堵住本来应唤醒它的写入。本方案明确排除这种实现。
+本轮之前，Rust 核心已有提交后合并通知，但 Native 尚未暴露非阻塞订阅。其普通 Worker 请求通道是串行的；若把 Native 长等待塞进该通道，会堵住本来应唤醒它的写入。本方案明确排除这种实现。
 
 在普通请求执行之外暴露有 owner、容量有界的 Native 唤醒通道。先注册，再读初始 head，之后按 checkpoint 追持久日志。信号可合并，日志覆盖不能丢；共享 Native owner 的本地与远端同步提交均要唤醒。消费者复用 Machine RPC/Electron watchChanges，不新增每会话网络连接。取消订阅者只释放其 waiter，不终止共享 writer。
 
@@ -199,3 +199,5 @@ shared-body-validation/native-publication/；不提交运行库或捕获的用�
 已安装平台包，完整 Electron 套件改用相同候选的实际 split-package 布局单独通过；
 i18n 和所有后续边界检查通过。未把根命令的装配失败或已发布 npm 图称为通过。初次
 未用参数、协议预期值及装配失败与复测日志均保留；docs 0 错误、71 警告。
+
+消费方草稿：[LodyAI/Lody#1839](https://github.com/LodyAI/Lody/pull/1839)，审查基线为 codex/roost-stack-integration。先合入前序栈与 Roost #28、发布匹配包，再更新消费方依赖并调整最终合入目标。

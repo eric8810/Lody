@@ -116,8 +116,8 @@ Preserve offline cached reads and existing transport/access boundaries.
 
 ## Observation without blocking writes
 
-The Rust core has after-commit, coalesced subscriptions, but Native does not yet
-expose a nonblocking notification subscription. Its ordinary Worker request lane
+Before this unit, Rust core already had after-commit, coalesced subscriptions,
+but Native did not expose a nonblocking notification subscription. Its ordinary Worker request lane
 is serial. A long Native watch on that lane would prevent the writes that wake
 it; this design explicitly rejects that implementation.
 
@@ -345,3 +345,5 @@ in the actual split-package layout; i18n and all remaining boundary guards pass.
 Do not relabel that root command or the published npm graph as passing. Initial
 unused-parameter/protocol-golden and setup failures remain with corrected runs;
 docs reports zero errors and 71 warnings.
+
+Consumer draft: [LodyAI/Lody#1839](https://github.com/LodyAI/Lody/pull/1839), reviewed against codex/roost-stack-integration. Land the preceding stack and Roost #28, publish matching packages, then update consumer pins and retarget for final merge.
