@@ -3,6 +3,7 @@
 Status: proposed
 Translation: current
 Date: 2026-10-24
+Pull request: [LodyAI/Lody#1845](https://github.com/LodyAI/Lody/pull/1845)
 
 [中文](2026-10-24-roost-position-paging.zh.md)
 
@@ -77,7 +78,7 @@ failed stages; no performance assertions enter ordinary CI.
 ## Outcome and acceptance limits
 
 The implementation is complete locally; the decision remains **proposed**.
-This unit is prepared as a stacked draft on the preceding Native-publication PR.
+Draft #1845 is stacked on the preceding Native-publication PR (#1839).
 It has not been merged, deployed or used to clean up existing data. Only Lody
 runtime behavior changes; the preceding shared-body/Native-publication stack is
 required, but this unit adds no Roost SDK, Native, storage-body or wire changes.

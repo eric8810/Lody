@@ -3,6 +3,7 @@
 Status: proposed
 Translation: current
 Date: 2026-10-24
+Pull request: [LodyAI/Lody#1845](https://github.com/LodyAI/Lody/pull/1845)
 
 [English](2026-10-24-roost-position-paging.md)
 
@@ -58,8 +59,7 @@ WAL 及 RSS 轨迹；另比较百条、千条、万条已准备历史的位置�
 
 ## 结果与验收边界
 
-实现已在本地完成，决策仍为 **proposed**。本单元准备作为前置 Native 提交优化之后的
-叠加 Draft PR，尚未合入、部署或用于清理现有数据。运行时代码只改 Lody；依赖前面的共享正文与 Native 提交结果栈，
+实现已在本地完成，决策仍为 **proposed**。本单元已开 Draft #1845，叠加在前置 Native 提交优化 #1839 之后，尚未合入、部署或用于清理现有数据。运行时代码只改 Lody；依赖前面的共享正文与 Native 提交结果栈，
 但本单元没有新增 Roost SDK、Native、正文格式或线协议变更。
 单靠已发布的 npm 0.2.0 不能验证前置栈。
 
