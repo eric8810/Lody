@@ -7,7 +7,181 @@ Translation: current
 
 ## Abstract
 
-Eight open Roost PRs and ten open Lody PRs form two dependent stacks whose tips already contain the preceding changes. The complete candidate merges with pinned Lody main and passes the joint owning behavioral suites. Local durable measurements improve write scaling and prepared-index dispatch, but retain a storage gap, one RSS regression and a resource-limited Loro trial. Merge and publish the matching Roost changes before pinning and landing the dependent Lody changes. Registry CI remains blocked by unreleased APIs; source-linked and local-tarball tests do not remove that gate.
+Ten open Roost PRs and thirteen open Lody PRs form cumulative dependent stacks. The audit found one sequential documentation conflict, a missing Native capability declaration and a new-toolchain Clippy gate; the authorized non-release repairs now address all three while preserving runtime/body contracts and benchmark inputs. The parent fixes are propagated through their stacks, with local compilation and completed Rust suite coverage recorded below. Publication pairing remains explicitly deferred. Today's main also upgrades Loro dependencies, so the earlier fixed-candidate results do not establish acceptance of that newer combined graph.
+
+## Authorized non-release repairs — 2026-10-24
+
+The user authorized fixing the non-release audit findings while explicitly
+leaving publication pairing alone. The decoder Clippy fix lands in Roost #27 at
+`345cc5e3b49bdfb67b38906fd649d2a58e56976d`; Roost #28 merges that parent and
+adds the two missing owner-capability declarations at
+`ae53cf64967d669ecdff6df32a6f34df7a74d687`. The fixed-width iterator retains
+its nonempty/divisibility/count and field checks. Native runtime advertisement,
+wire/body format, durability and all version fields are unchanged.
+
+Rust 1.99.1 fmt and all-target Clippy, SDK typecheck/build and the existing Native
+assignability/format checks pass. The first full serial Rust test command has
+one retained rs3 HTTP `Transport(Unavailable)` failure. Its isolated retry,
+complete 22-test owning suite, previously unexecuted targets and doc tests pass,
+completing 379 unique passes and six existing ignored tests. No successful
+unrelated suites were restarted. The checked runtime hashes match after placing
+the parent/child commits; logs remain in `pr-stack-audit-20261024/fixes/`.
+
+Lody #1839 now merges #1830 into its head, preserving the nonempty report-links
+side of the only guide conflict. Before adding this report update, the entire
+resolved tree is byte-for-byte identical to pre-repair #1839. Thus the repair
+changes ancestry and removes the sequential conflict without changing runtime,
+tests or benchmark inputs. #1845 inherits that repaired parent. Full Lody
+runtime checks and benchmark measurements are reused at their recorded source
+identity; this documentation/ancestry-only repair runs root formatting and docs
+checks, without a new complete runtime or benchmark run.
+
+Release versions, Rust/npm package publication, platform dependency pins, Lody
+catalog/lockfile updates, current-main dependency integration and deployment
+remain deferred. The audit tables below are the **pre-repair snapshot**, not
+claims that the declaration/lint or documentation fixes are still outstanding.
+The registry dependency graph remains an explicit release gate.
+
+## Audit snapshot before repairs — 2026-10-24
+
+This refresh reviews ten open Roost PRs (#19–28) and thirteen open Lody PRs
+(#1773–1845, listed below). It changes no implementation, PR base, readiness,
+merge, publication or deployment state. The only tracked edits are this bilingual
+report, on a separate local audit branch. Findings are targeted source/contract
+and merge checks, not a proof of all corruption or concurrency schedules.
+
+### Exact current sources and merge results
+
+| Source | Frozen commit |
+| --- | --- |
+| Roost main | `1b6df6199ca2973efd6912f2e7611ba306e9aaa3` |
+| Roost #28 tip | `bb40f9eab9b539c5fe8ebecda61f9ee945a96a44` |
+| Lody main | `c92f71fe5c4bcc0c93beb20cff4d4004a32dff41` |
+| Lody #1845 tip | `56d5514f923c69c4c9dac6790e5edb9b90057b41` |
+| Lody #1839 integration base | `812bc3c21da3b3d160eccd6f2cbd05884962d4eb` |
+
+Roost has zero main-only and 19 stack-only commits. Every preceding head is an
+ancestor of the next; the complete main/tip merge and the sequential #19–28
+merge simulations succeed.
+
+Lody has 15 main-only and 29 tip-only commits, with common base `957b513ee391`.
+The current main and #1845 merge automatically. Five paths change on both sides:
+`doc.ts`, `message-handler.ts`, `session-execution-service.ts`, the Roost backend
+contract suite and `create-workspace-runtime.ts`. Targeted review finds no new
+P0/P1 semantic conflict in those overlaps: main's Loro persistence-failure observer
+remains in the Loro repository, and notification excerpts use the exact assistant
+identity through the existing complete selected-turn read.
+
+There is **one real sequential merge conflict**: after merging #1830, #1839
+conflicts in `.agents/docs/roost-validation.md`. #1839's integration base contains
+#1821 and pinned main, but not #1830. Thus #1830 is a sibling benchmark/report
+branch, not a Git ancestor of #1839. The one conflict hunk has an empty #1830 side
+and #1839's added report links on the other side. In an audit-only virtual tree,
+retaining those links allows #1845 to merge. The resulting complete tree is
+`bf03b998b142d0175abde1ed6ea708f040c84557`, **exactly identical** to current
+main + #1845. No runtime/test/report addition from #1830 is missing from that
+final combined tree. This demonstrates the content relationship; it does not
+resolve any real branch or replace tests on that tree.
+
+### Current dependency order
+
+The following arrows give landing order. All Roost arrows are Git ancestry;
+the Lody #1830 → #1839 step additionally needs the documentation resolution and
+retarget/rebase described above.
+
+- Roost: #19 → #20 → #21 → #22 → #23 → #24 → #25 → #26 → #27 → #28.
+- Lody: #1773 → #1784 → #1791 → #1800 → #1804 → #1806 → #1807 → #1811 → #1817 → #1821 → #1830 → #1839 → #1845.
+
+| Newer PR | Role / cross-repository prerequisite |
+| --- | --- |
+| [Roost #27](https://github.com/loro-dev/roost/pull/27) | Shared immutable frame bodies; follows #26; final container 10 / RSP3 |
+| [Roost #28](https://github.com/loro-dev/roost/pull/28) | Receipt checks and bounded Native observation; follows #27; retains container 10 |
+| [Lody #1830](https://github.com/LodyAI/Lody/pull/1830) | Benchmark/report companion to #27, above #1821; no runtime API change |
+| [Lody #1839](https://github.com/LodyAI/Lody/pull/1839) | Native publication/observer/head and protocol/cache v3; requires Roost #28 and the integration base |
+| [Lody #1845](https://github.com/LodyAI/Lody/pull/1845) | Position mapping and narrow history reads; follows #1839; no further Roost API |
+
+Earlier companion boundaries remain #1791 ↔ Roost #21, #1800 ↔ #22,
+#1807 ↔ #23/#24, #1811 ↔ #25 and #1817 ↔ #26. #1773/#1784 can use the
+published 0.2.0 at their own heads; #1791 onward introduces unreleased requirements.
+
+Preserve ancestry when landing this stack. If parents are squashed/rebased,
+rebase and retarget descendants rather than assuming their old bases remain
+valid. #1839's integration branch is not another PR or an additional optimization
+to apply after the tip; preserve its main merge and owning changes while retargeting.
+No PR is automatically closed, merged or marked ready by this audit.
+
+### Supersession and independently versioned contracts
+
+Repeated edits are cumulative refinements. No competing runtime implementation
+was identified in the final combined stack. Roost #27 replaces RSP2's body copies
+with RSP3 references while keeping #19's bounded inline/expand policy, #20's Native
+outbox policy, #22's packed logs and #23–26's cache/checkpoint fences. #28 retains
+exact transaction checks; observations are wake hints, not substitutes for journal
+reads or CAS.
+
+Actual container progression is 5 (#19), 7 (#20), 8 (#21), 9 (#22–26), then
+10 (#27–28). Earlier v8/v9 assertions describe intermediate heads, not final
+requirements. The final runtime accepts fresh/v10 only, without migration,
+legacy reader or automatic deletion. Publish the final stack once; intermediate
+containers need not become released upgrades. Old data stays with its matching
+runtime unless a separate explicit data-handling decision is made.
+
+The final Lody owner requires `commit-metadata-v1`, `derived-indexes-v1`,
+`receipt-checks-v1` and `commit-observation-v1`. History protocol and renderer
+cache are version 3, while agent receipts remain version 2. Dispatch position
+checkpoint 2 certifies rebuildable local derived state; it is not a new body or
+wire format. CLI and renderer must ship together at the protocol-v3 boundary.
+These distinct version numbers do not conflict.
+
+### Concrete CI and release blockers
+
+The current CI failures are **not all registry-version failures**:
+
+| Boundary | Evidence and required action |
+| --- | --- |
+| Roost #28 Native declarations | [Linux job](https://github.com/loro-dev/roost/actions/runs/39926735363/job/120324862721) and a Windows job build the addon, then fail the in-tree `pnpm check` with TS2322. `NativeCapability` includes `receipt-checks-v1` and `commit-observation-v1`, but [`OwnerCapability`](https://github.com/loro-dev/roost/blob/bb40f9eab9b539c5fe8ebecda61f9ee945a96a44/ts/node/client.d.mts#L4) omits both. The SDK is linked from `../../ts`, so this is a source declaration mismatch, independent of npm publication. Synchronize the capability contract and rerun Native type/platform checks. |
+| Roost #27/#28 Rust | [#28 Rust check](https://github.com/loro-dev/roost/actions/runs/39926735298/job/120324860752) and #27 fail `cargo +stable clippy --offline --locked --all-targets -- -D warnings` on Rust 1.99.1 at `src/projection/codec.rs:70` (`chunks_exact_to_as_chunks`). Their preceding unit/doc tests pass. Clear the lint gate without changing byte-decoding behavior. |
+| Roost release preparation | [#27 release preview](https://github.com/loro-dev/roost/actions/runs/39803040267/job/119915082257) reaches the existing published `0.2.0` collision. Source manifests still use that version. Prepare a coordinated new SDK/Native/six-platform version; no package is published by this audit. |
+| Lody registry pair | [#1845 static checks](https://github.com/LodyAI/Lody/actions/runs/40000297359/job/120574799546) and #1839 still install published SDK/Native 0.2.0. They lack the new APIs/capabilities. #1839 also has real generation-fence assertion failures with that old pair, not just compiler errors. Pin the matching released SDK/Native and update the catalog/lockfile, then rerun registry-based CI; never suppress the type or capability guards. |
+| Historical Roost #23/#24 matrices | Sampled failed jobs show pnpm 12.3.4 registry timeout/HTTP 503 acquisition. Those failures precede runtime assertions and are separate from the current #28 declaration failure. |
+
+The previous matching local #1845 pair passes complete Lody root checks, including
+4,559 CLI tests (4 skipped), 5,962 component tests, 1,610 shared tests and desktop
+packaging/tests. That coverage includes the generation-fence cases failing with
+the old registry pair. It does **not** make Roost's separate Native declaration
+check green, establish a usable published dependency graph, or remove the two
+Roost source/toolchain gates above.
+
+### Remaining acceptance and next action
+
+Current main upgrades Loro 1.16.3 → 1.17.0, LoroRepo 0.23.3 → 0.25.0 and
+streams-crdt 0.19.1 → 0.19.2. Those changes are upstream, not edits made by this
+audit. The earlier full-root and benchmark results retain their original pinned
+sources; they do not validate today's combined dependency graph or a new Loro
+comparison. No full suite or benchmark was restarted for this read/merge audit.
+
+Before landing: clear the Roost declaration/lint/version gates; land the Roost
+chain and release one matching final version from main; update the Lody pins and
+lockfile, resolve the one guide conflict while retargeting the chain, then run the
+owning behavior suites and required full checks on the actual combined graph.
+Rebenchmark that frozen graph when reporting new current-main performance.
+No implementation fixes or PR mutations are made here.
+
+Raw GitHub metadata, failed CI logs, exact refs, ancestry/merge-tree results and
+virtual-tree evidence are outside Git in
+`shared-body-validation/pr-stack-audit-20261024/`. The Roost HTTPS refetch stalled
+and was cancelled; GitHub API heads/main already matched exact locally available
+commit objects. Lody's current refs were fetched. Virtual merges use temporary
+commit/index objects and do not update working branches or remote refs.
+Documentation checks validate this report separately from runtime acceptance.
+
+## Historical evidence below — original pinned 2026-10-22 snapshot
+
+The remaining sections preserve earlier source identities, measurements and
+subsequent shared-body follow-up evidence. The current inventory, container and
+landing blockers above supersede their older current-state wording; historical
+benchmark results keep their stated inputs and must not be relabeled as today's
+combined-tree measurements.
 
 ## Scope and source identity
 
