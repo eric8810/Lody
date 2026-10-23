@@ -7,7 +7,145 @@ Translation: current
 
 ## 摘要
 
-8 个开放的 Roost PR 和 10 个开放的 Lody PR 组成两条依赖链，栈顶各自已包含之前的改动。完整候选与固定的 Lody main 可以合并，并通过关联行为测试。本地持久化测量改善了增长写入和已建索引的 dispatch，但仍有存储差距、一项 RSS 回升及 Loro 一轮资源受限失败。应先合并并发布匹配的 Roost，再更新依赖、落地 Lody 改动。当前新 API 尚未发包，源码链接和本地 tarball 测试通过仍不能解除 registry CI 的门槛。
+10 个开放 Roost PR 和 13 个开放 Lody PR 组成累积依赖栈。审查发现一处顺序合并文档冲突、Native 能力声明缺项和新工具链 Clippy 门槛；授权的非发布修复已处理这三项，保留运行时/正文契约及 benchmark 输入，并向后同步父分支修复。下文记录本地编译和补齐后的 Rust 套件覆盖。发布配对明确暂缓；当前 main 还升级了 Loro 依赖，原固定候选的结果不代表该新合成图已验收。
+
+## 授权的非发布修复 — 2026-10-24
+
+用户授权修复审查中的非发布问题，并明确暂不处理发布配对。解码器 Clippy 修复已放到
+Roost #27，提交 `345cc5e3b49bdfb67b38906fd649d2a58e56976d`；Roost #28
+合入父分支修复并补齐两个 owner 能力类型值，提交
+`ae53cf64967d669ecdff6df32a6f34df7a74d687`。固定宽度迭代器保留非空、整除、
+数量和字段检查；Native 实际广播能力、wire/正文格式、持久化及全部版本字段保持不变。
+
+Rust 1.99.1 fmt/全目标 Clippy、SDK 类型检查/构建，以及既有 Native 可赋值编译契约/
+格式检查通过。首次全量串行 Rust 测试有一项 rs3 HTTP `Transport(Unavailable)`
+失败，日志保留。失败项单跑、所属完整 22 项套件、之前未执行的 target 及文档测试通过，
+合计 379 项独立通过、6 项既有忽略；没有重跑已成功的无关套件。放置父/子提交后，
+源码哈希与已验证输入一致，日志位于 `pr-stack-audit-20261024/fixes/`。
+
+Lody #1839 将 #1830 合入自己的 head，保留唯一 guide 冲突中非空的报告链接。
+添加本报告更新之前，完整解决树与修复前 #1839 逐字节一致。因此该处理修复祖先关系、
+清除顺序合并冲突，没有改变运行时、测试或 benchmark 输入；#1845 继承修复后的父分支。
+既有 Lody 全量运行时检查和测量保留原源码标识，本次文档/祖先关系修复仅运行根格式化及
+文档检查，没有重启完整运行时测试或 benchmark。
+
+发布版本、Rust/npm 发包、平台包依赖 pins、Lody catalog/lockfile、最新 main 依赖整合
+及部署继续暂缓。下方审查表格是**修复前快照**，不代表声明/lint 和文档修复仍未完成；
+registry 依赖图仍是明确的发布门槛。
+
+## 修复前审查快照 — 2026-10-24
+
+本次更新核对 10 个开放 Roost PR（#19–28）和 13 个开放 Lody PR（下列 #1773–1845）。
+没有修改实现、PR 基线、就绪状态、合并、发包或部署状态。唯一跟踪文件修改是这份双语报告，
+放在独立本地审查分支。结论来自定向源码/契约审查及合并检查，不是所有损坏或并发时序的正确性证明。
+
+### 当前精确源码与合并结果
+
+| 来源 | 固定提交 |
+| --- | --- |
+| Roost main | `1b6df6199ca2973efd6912f2e7611ba306e9aaa3` |
+| Roost #28 栈顶 | `bb40f9eab9b539c5fe8ebecda61f9ee945a96a44` |
+| Lody main | `c92f71fe5c4bcc0c93beb20cff4d4004a32dff41` |
+| Lody #1845 栈顶 | `56d5514f923c69c4c9dac6790e5edb9b90057b41` |
+| Lody #1839 整合基线 | `812bc3c21da3b3d160eccd6f2cbd05884962d4eb` |
+
+Roost 为 main 独有 0 个提交、栈独有 19 个提交。每个前置 head 都是后一个 head 的祖先；
+完整 main/栈顶合并及 #19–28 顺序合并模拟均通过。
+
+Lody 为 main 独有 15 个提交、栈顶独有 29 个提交，共同祖先为 `957b513ee391`。
+当前 main 和 #1845 可以自动合并。两边共同修改五个路径：`doc.ts`、`message-handler.ts`、
+`session-execution-service.ts`、Roost backend contract 测试和 `create-workspace-runtime.ts`。
+这些重叠的定向审查没有发现新增 P0/P1 语义冲突：main 的 Loro 持久化失败 observer 仍在 Loro
+仓库内部；通知摘要通过原本完整的单条读取接口，读取准确的助手消息 ID。
+
+存在 **一处真实的顺序合并冲突**：合入 #1830 后，#1839 会在
+`.agents/docs/roost-validation.md` 冲突。#1839 的整合基线包含 #1821 和固定 main，
+但不包含 #1830，因此 #1830 是并行的 benchmark/报告分支，不是 #1839 的 Git 祖先。
+唯一冲突块在 #1830 一侧为空，另一侧是 #1839 新增的报告链接。在仅用于审查的虚拟树里保留
+这些链接后，#1845 可以合并，最终完整树为 `bf03b998b142d0175abde1ed6ea708f040c84557`，
+与当前 main + #1845 **逐文件完全相同**。因此 #1830 没有运行时、测试或报告内容遗落在
+最终合成树之外。这说明内容关系，没有解决任何真实分支，也不能替代合成树上的测试。
+
+### 当前依赖顺序
+
+下列箭头表示落地顺序。Roost 全部箭头都是 Git 祖先关系；Lody 的 #1830 → #1839
+还需要上述文档冲突处理，以及 retarget/rebase。
+
+- Roost：#19 → #20 → #21 → #22 → #23 → #24 → #25 → #26 → #27 → #28。
+- Lody：#1773 → #1784 → #1791 → #1800 → #1804 → #1806 → #1807 → #1811 → #1817 → #1821 → #1830 → #1839 → #1845。
+
+| 后续 PR | 职责 / 跨仓前置依赖 |
+| --- | --- |
+| [Roost #27](https://github.com/loro-dev/roost/pull/27) | 共享不可变 frame 正文；接 #26；最终 container 10 / RSP3 |
+| [Roost #28](https://github.com/loro-dev/roost/pull/28) | Native 收据检查和有界观察；接 #27；保持 container 10 |
+| [Lody #1830](https://github.com/LodyAI/Lody/pull/1830) | #27 的 benchmark/报告，基于 #1821；没有运行时 API 改动 |
+| [Lody #1839](https://github.com/LodyAI/Lody/pull/1839) | Native 提交/observer/head 及协议/缓存 v3；依赖 Roost #28 和整合基线 |
+| [Lody #1845](https://github.com/LodyAI/Lody/pull/1845) | 位置映射及按需历史读取；接 #1839；不新增 Roost API |
+
+较早的配套边界仍为 #1791 ↔ Roost #21、#1800 ↔ #22、#1807 ↔ #23/#24、
+#1811 ↔ #25、#1817 ↔ #26。#1773/#1784 在各自 head 可以使用已发布的 0.2.0，
+从 #1791 开始引入尚未发包的要求。
+
+落地时保留祖先关系；如果父 PR 使用 squash/rebase，需 rebase 并重定向后续 PR，
+不能假定旧 base 仍有效。#1839 的整合分支不是另一个 PR，也不是在栈顶之后另打一遍的优化；
+重定向时保留其中的 main 合并及所属修改。本次没有自动关闭、合并 PR 或转为 ready。
+
+### 后续替换与独立版本契约
+
+重复修改属于累积改进，最终整合栈没有发现互斥的运行时实现。Roost #27 将 RSP2 正文副本
+替换为 RSP3 引用，同时保留 #19 的有界 inline/expand、#20 的 Native outbox 策略、
+#22 的 packed log，以及 #23–26 的缓存与 checkpoint 校验。#28 保留精确事务检查，
+观察事件只负责唤醒，不能替代 journal 读取或 CAS。
+
+实际 container 演进为 5（#19）、7（#20）、8（#21）、9（#22–26），最后到 10（#27–28）。
+较早 v8/v9 断言描述中间 head，不是最终要求。最终运行时只接受新库/v10，没有迁移、旧读取器
+或自动删除。整合完统一发一次最终版本，中间容器不必逐个对外发布。旧数据继续匹配旧运行时，
+除非另有明确的数据处理决定。
+
+最终 Lody owner 要求 `commit-metadata-v1`、`derived-indexes-v1`、`receipt-checks-v1`
+和 `commit-observation-v1`。历史协议和渲染缓存为 3，agent 收据独立保持 2。
+位置 checkpoint 2 认证可重建的本地派生状态，不是新的正文或 wire 格式。
+跨协议 v3 边界时 CLI 和渲染端要配套上线；这些独立版本号不存在冲突。
+
+### 明确的 CI 与发布阻塞
+
+当前 CI 失败 **不能全部归因于 registry 版本**：
+
+| 边界 | 证据及处理要求 |
+| --- | --- |
+| Roost #28 Native 声明 | [Linux job](https://github.com/loro-dev/roost/actions/runs/39926735363/job/120324862721) 和一个 Windows job 在 addon 构建后，源码内 `pnpm check` 报 TS2322。`NativeCapability` 包含 `receipt-checks-v1` 和 `commit-observation-v1`，但 [`OwnerCapability`](https://github.com/loro-dev/roost/blob/bb40f9eab9b539c5fe8ebecda61f9ee945a96a44/ts/node/client.d.mts#L4) 漏了这两个值。SDK 直接链接 `../../ts`，这是源码类型声明未同步，与 npm 是否发布无关。需同步能力契约，重跑 Native 类型及平台检查。 |
+| Roost #27/#28 Rust | [#28 Rust 检查](https://github.com/loro-dev/roost/actions/runs/39926735298/job/120324860752) 及 #27 在 Rust 1.99.1 下执行 `cargo +stable clippy --offline --locked --all-targets -- -D warnings` 时，于 `src/projection/codec.rs:70` 被 `chunks_exact_to_as_chunks` 阻塞；前面的单元及文档测试通过。修正 lint 时需保留字节解码行为。 |
+| Roost 发布准备 | [#27 发布预览](https://github.com/loro-dev/roost/actions/runs/39803040267/job/119915082257) 遇到已经发布的 `0.2.0` 版本冲突；源码 manifest 仍用该版本。需统一准备新的 SDK/Native/六平台版本；本次不发布任何包。 |
+| Lody registry 配对 | [#1845 静态检查](https://github.com/LodyAI/Lody/actions/runs/40000297359/job/120574799546) 和 #1839 仍安装已发布 SDK/Native 0.2.0，缺少新 API/能力。#1839 使用旧配对时还有真实 generation fence 行为断言失败，不仅是编译错误。需发布后固定配套版本，更新 catalog/lockfile，再跑 registry CI，不能压掉类型或能力检查。 |
+| 历史 Roost #23/#24 平台检查 | 抽查失败日志属于 pnpm 12.3.4 的 registry timeout / HTTP 503 获取失败，发生在运行时断言前，与当前 #28 的声明错误不同。 |
+
+之前使用匹配本地包的 #1845 已通过完整 Lody 根检查，包括 CLI 4,559 项（跳过 4 项）、
+组件 5,962 项、shared 1,610 项及桌面打包/测试，覆盖旧 registry 配对失败的 generation fence
+用例。这不能使 Roost 独立的 Native 声明检查变绿，也不能证明已发布依赖图可用，
+或消除上述两处 Roost 源码/工具链门槛。
+
+### 剩余验收与下一步
+
+当前 main 将 Loro 1.16.3 升到 1.17.0、LoroRepo 0.23.3 升到 0.25.0、
+streams-crdt 0.19.1 升到 0.19.2。这些是上游改动，本次审查没有修改它们。
+之前全仓检查和 benchmark 保留原固定源码的口径，没有验证今天合成后的依赖图或新的 Loro
+对比。本次只读及合并审查没有重新启动全套测试或 benchmark。
+
+落地前应清掉 Roost 类型声明/lint/版本门槛；按 Roost 链合入后从 main 统一发布一个最终版本；
+更新 Lody pins 和 lockfile，重定向链时处理唯一文档冲突，然后在实际合成依赖图上运行所属行为
+测试和必需的全量检查。需要报告当前 main 性能时，再对固定的新图重新 benchmark。
+本次没有进行实现修复或修改 PR。
+
+原始 GitHub 元数据、失败 CI 日志、精确 refs、祖先/merge-tree 结果和虚拟树证据保存在仓库外的
+`shared-body-validation/pr-stack-audit-20261024/`。Roost HTTPS 重新 fetch 卡住后已取消；
+GitHub API 的 head/main 与本地现有精确提交对象匹配。Lody 当前 refs 已拉取。
+虚拟合并只创建临时 commit/index 对象，没有更新工作分支或远端 refs。
+文档检查单独验证报告，不构成运行时验收。
+
+## 以下为历史证据 — 原固定 2026-10-22 快照
+
+后续章节保留早期源码、测量和之后的共享正文记录。当前 PR 清单、container 和落地阻塞以上文为准；
+历史 benchmark 继续对应原输入，不能改称今天合成树的测量。
 
 ## 范围与源码标识
 
