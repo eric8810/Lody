@@ -438,6 +438,16 @@ once from bounded coherent pages; valid persisted indexes do not scan old bodies
 on reopen. Explicit replay/export retain full history reads. See the
 [dispatch projection note](../../../../.agents/notes/proposed/architecture/2026-10-22-roost-dispatch-scalar-projection.md).
 
+Positional range reads use the same certified projection's position-to-business-ID
+mapping and hydrate only the selected rows' ordered physical segments. The version-2
+checkpoint certifies the mapping; its puts and rebuild completion share the existing
+index transaction. Before caching bodies, the reader rechecks the index marker,
+event cursor and resolved history generation, including index-only activation.
+An absent or damaged projection retains existing page traversal and diagnostics;
+a range read never initiates a full index rebuild or fills a partial replica.
+The body cache remains bounded. See the
+[position paging experiment](../../../../.agents/notes/proposed/architecture/2026-10-24-roost-position-paging.md).
+
 Latest-turn queries share `readLatestTurn` from session-data. It scans the latest
 40-row page first and reads older pages only when no readable match is present.
 The `accept_input_and_dispatch` activation guard uses this path too: a newly

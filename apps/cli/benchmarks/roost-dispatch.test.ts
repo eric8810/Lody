@@ -28,7 +28,7 @@ assert.ok(dir && isAbsolute(dir), 'LONG_BENCH_DIR must be an absolute synthetic 
 const kind = process.env.LONG_BENCH_KIND;
 assert.ok(kind === 'roost' || kind === 'loro');
 const stage = process.env.LONG_BENCH_STAGE;
-assert.ok(stage === 'prepare' || stage === 'measure' || stage === 'verify');
+assert.ok(stage === 'prepare' || stage === 'measure' || stage === 'verify' || stage === 'ranges');
 const count = Number(process.env.LONG_BENCH_PREFIX);
 assert.ok(Number.isSafeInteger(count) && count > 0 && count % 2 === 0);
 const sessionId = '00000000-0000-4000-8000-000000000003' as SessionId;
@@ -253,6 +253,61 @@ it('measures fixed-prefix durable dispatch and append scaling', async () => {
       );
       assert.equal((latest as unknown[]).length, 20);
       memory('latest-window');
+      if (stage === 'ranges') {
+        const ranges: unknown[] = [];
+        for (const [name, from] of [
+          ['oldest', 0],
+          ['middle', Math.floor(count / 2)],
+          ['quarter', Math.floor(count / 4)],
+        ] as const) {
+          const samples: number[] = [];
+          const readCpu = { user: 0, system: 0 };
+          let contentDigest = '';
+          for (let repeat = 0; repeat < 10; repeat++) {
+            const before = process.cpuUsage();
+            const read = await timer(async () => {
+              const rows = await backend.readHistoryDirectory(from, from + 20);
+              const entries = [];
+              for (const row of rows) {
+                assert.ok(row.turnId);
+                const turn = await backend.readTurn(row.turnId);
+                assert.equal(turn.state, 'ready');
+                if (turn.state === 'ready') entries.push(turn.turn);
+              }
+              return entries;
+            });
+            const spent = process.cpuUsage(before);
+            readCpu.user += spent.user;
+            readCpu.system += spent.system;
+            samples.push(read.ms);
+            // Validate outside the timed read; no full-history materialization.
+            assert.equal(read.value.length, 20);
+            const content = read.value.map((entry, i) => {
+              const expected = prefixEntry(from + i);
+              assert.equal(entry.id, expected.id);
+              assert.equal(entry.role, expected.role);
+              assert.deepEqual(entry.items, expected.items);
+              return { id: entry.id, role: entry.role, items: entry.items };
+            });
+            contentDigest = createHash('sha256')
+              .update(JSON.stringify(canonical(content)))
+              .digest('hex');
+            memory(`${name}-${repeat}`);
+          }
+          ranges.push({
+            name,
+            from,
+            coldMs: samples[0],
+            warm: stats(samples.slice(1)),
+            samples,
+            cpu: readCpu,
+            contentDigest,
+          });
+        }
+        result.ranges = ranges;
+        result.finalStorage = await size();
+        return;
+      }
       if (stage === 'measure') {
         const watcher = new SessionDispatchWatcher({
           logger: getDefaultLogger(),

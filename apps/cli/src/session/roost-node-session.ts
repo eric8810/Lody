@@ -1070,6 +1070,56 @@ const createNodeServicesForLease = async (
       if (generation === readGeneration) fullEntriesCache = projected.map((entry) => clone(entry));
       return projected.map((entry) => clone(entry));
     });
+  const rememberPageEntries = (start: number, projected: readonly SessionEntry[]): void => {
+    for (const [offset, turn] of projected.entries()) {
+      const position = start + offset;
+      const prior = pageEntries.get(turn.id);
+      if (prior) pageIdsByPosition.delete(prior.position);
+      pageEntries.delete(turn.id);
+      pageEntries.set(turn.id, { position, turn });
+      pageIdsByPosition.set(position, turn.id);
+    }
+    while (pageEntries.size > pageBodyLimit) {
+      const oldest = pageEntries.keys().next().value;
+      if (oldest === undefined) break;
+      const prior = pageEntries.get(oldest);
+      if (prior) pageIdsByPosition.delete(prior.position);
+      pageEntries.delete(oldest);
+    }
+  };
+  const readIndexedEntries = async (
+    source: NodeLodyHistory,
+    dispatchRows: readonly RoostDispatchRow[]
+  ): Promise<SessionEntry[]> => {
+    const physical = dispatchRows.flatMap((row) =>
+      row.segments.map((segment) => ({ ...segment, businessId: row.entry.id }))
+    );
+    const messages: HistoryProjectedMessage[] = [];
+    for (let start = 0; start < physical.length; start += 500) {
+      const ids = physical
+        .slice(start, start + 500)
+        .map((segment) => Uint8Array.from(Buffer.from(segment.turnId, 'hex')));
+      messages.push(...(await source.readProjectedMessagesById(ids)));
+    }
+    const byId = new Map(messages.map((message) => [bytesHex(message.turnId), message]));
+    const ordered = physical.map((segment) => byId.get(segment.turnId));
+    if (
+      ordered.some(
+        (message, i) =>
+          !message ||
+          message.businessId !== physical[i]?.businessId ||
+          message.segmentId !== physical[i]?.segmentId
+      )
+    )
+      throw new Error('Roost indexed history is incomplete');
+    const projected = await projectMessages(ordered as HistoryProjectedMessage[]);
+    if (
+      projected.length !== dispatchRows.length ||
+      projected.some((entry, i) => entry.id !== dispatchRows[i]?.entry.id)
+    )
+      throw new Error('Roost indexed logical history is incomplete');
+    return projected;
+  };
   const readPage = async (input: Parameters<typeof roostHistory.readActiveBranchPage>[1]) => {
     const generation = readGeneration;
     const source = roostHistory;
@@ -1084,21 +1134,7 @@ const createNodeServicesForLease = async (
       throw new Error(`Roost latest page for ${viewId} does not reach the active head`);
     }
     if (branch.state.revision === currentBranch().state.revision) {
-      for (const [index, turn] of projected.entries()) {
-        const position = branch.startPosition + index;
-        const prior = pageEntries.get(turn.id);
-        if (prior) pageIdsByPosition.delete(prior.position);
-        pageEntries.delete(turn.id);
-        pageEntries.set(turn.id, { position, turn });
-        pageIdsByPosition.set(position, turn.id);
-      }
-      while (pageEntries.size > pageBodyLimit) {
-        const oldest = pageEntries.keys().next().value;
-        if (oldest === undefined) break;
-        const prior = pageEntries.get(oldest);
-        if (prior) pageIdsByPosition.delete(prior.position);
-        pageEntries.delete(oldest);
-      }
+      rememberPageEntries(branch.startPosition, projected);
     }
     return { branch, projected };
   };
@@ -1137,6 +1173,52 @@ const createNodeServicesForLease = async (
         cached.push(entry);
       }
       if (cached.length === end - start) return cached;
+      const source = roostHistory;
+      const host = historyHost;
+      const generation = readGeneration;
+      const cursor = await source.observedEventCursor();
+      const index = dispatchIndex();
+      const checkpoint = await index.checkpoint(cursor, totalHistoryCount);
+      if (checkpoint) {
+        try {
+          const projected: SessionEntry[] = [];
+          for (let position = start; position < end; position += 500) {
+            const indexedRows = await index.range(
+              checkpoint,
+              position,
+              Math.min(position + 500, end)
+            );
+            projected.push(...(await readIndexedEntries(source, indexedRows)));
+          }
+          await index.validate(checkpoint);
+          if (cursor !== (await source.observedEventCursor())) {
+            needsRefresh = true;
+            throw staleRead();
+          }
+          // Generation replacement may be index-only, with no event-cursor change.
+          await historyGeneration.resolve();
+          if (
+            source !== historyGeneration.history ||
+            host !== historyGeneration.host ||
+            generation !== readGeneration ||
+            disposed
+          ) {
+            needsRefresh = true;
+            throw staleRead();
+          }
+          rememberPageEntries(start, projected);
+          return projected;
+        } catch (error) {
+          if (
+            !(error instanceof z.ZodError) &&
+            !(error instanceof SyntaxError) &&
+            !(error instanceof RoostDispatchIndexCorrupt)
+          )
+            throw error;
+          index.forget();
+          console.error(`Roost position projection is unavailable for ${viewId}`, error);
+        }
+      }
       const selected = new Map<number, SessionEntry>();
       await scanPages(({ branch, projected }) => {
         for (const [offset, entry] of projected.entries()) {
@@ -1230,22 +1312,7 @@ const createNodeServicesForLease = async (
           const row = await index.row(turnId, checkpoint);
           let projected: SessionEntry | undefined;
           if (row) {
-            const ids = row.segments.map((segment) =>
-              Uint8Array.from(Buffer.from(segment.turnId, 'hex'))
-            );
-            const messages = await roostHistory.readProjectedMessagesById(ids);
-            const byId = new Map(messages.map((message) => [bytesHex(message.turnId), message]));
-            const ordered = row.segments.map((segment) => byId.get(segment.turnId));
-            if (
-              ordered.some(
-                (message, offset) =>
-                  !message ||
-                  message.businessId !== turnId ||
-                  message.segmentId !== row.segments[offset]?.segmentId
-              )
-            )
-              throw new Error('Roost indexed dispatch turn is incomplete');
-            [projected] = await projectMessages(ordered as HistoryProjectedMessage[]);
+            [projected] = await readIndexedEntries(roostHistory, [row]);
             if (!projected || projected.id !== turnId)
               throw new Error('Roost indexed dispatch turn is unavailable');
           }

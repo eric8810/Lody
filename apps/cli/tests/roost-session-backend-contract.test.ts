@@ -4671,6 +4671,236 @@ describe('Production Roost dispatch projection', () => {
     expect(selected.history.map((entry) => entry.id)).toEqual(['dispatch-coherent-body']);
   });
 
+  it('reads cold positional ranges after reopen without hydrating intervening history', async () => {
+    const fixture = await nativeFixture();
+    await fixture.backend.appendHistoryTurn(nativeUser('position-state-user'));
+    await fixture.backend.appendHistoryTurn({
+      ...nativeAssistant('position-state-assistant'),
+      userTurnId: 'position-state-user',
+      finished: true,
+      items: [{ type: 'text', text: 'sealed base' }],
+    });
+    await fixture.backend.openAssistantTurn({
+      turnId: 'position-state-assistant',
+      userTurnId: 'position-state-user',
+      timestamp: '2026-10-24T00:00:00.000Z',
+    });
+    await fixture.backend.applyAgentBatch({
+      targetAssistantEntryId: 'position-state-assistant',
+      operationIds: ['position-state-append'],
+      contents: [{ type: 'text', text: ' late state' }],
+    });
+    await fixture.backend.applyHistoryAction({
+      kind: 'finish-assistant',
+      turnId: 'position-state-assistant',
+      endedAt: 42,
+    });
+    const turns = Array.from({ length: 65 }, (_, i) => nativeUser(`position-${i}`));
+    for (const turn of turns) await fixture.backend.appendHistoryTurn(turn);
+    await fixture.backend.flushLocalWrites();
+    const expected = await fixture.backend.readHistory();
+    const id = fixture.doc.sessionId;
+    await fixture.close();
+    const reopened = await nativeFixture(id);
+    await reopened.backend.flushLocalWrites();
+    vi.spyOn(NodeLodyHistory.prototype, 'readActiveBranch').mockRejectedValue(
+      new Error('Full branch read forbidden')
+    );
+    vi.spyOn(NodeLodyHistory.prototype, 'readActiveBranchPage').mockRejectedValue(
+      new Error('Intervening page hydration forbidden')
+    );
+    expect(await reopened.backend.history.readDirectory(0, 3)).toEqual(
+      expected.slice(0, 3).map((turn, position) => createRoostDirectoryRow(position, turn))
+    );
+    const selected = await reopened.backend.history.readRange(0, 3);
+    expect(selected.map((read) => (read.state === 'ready' ? read.turn : undefined))).toEqual(
+      expected.slice(0, 3)
+    );
+    if (selected[0]?.state !== 'ready') throw new Error('Expected old indexed turn');
+    selected[0].turn.items = [];
+    expect(await reopened.backend.readTurn('position-state-user')).toMatchObject({
+      state: 'ready',
+      turn: { id: expected[0]?.id, items: expected[0]?.items },
+    });
+    expect(
+      (await reopened.backend.history.readRange(12, 15)).map((read) =>
+        read.state === 'ready' ? read.turn : undefined
+      )
+    ).toEqual(expected.slice(12, 15));
+  });
+
+  it('retries a positional read when a foreign body changes during hydration', async () => {
+    const fixture = await nativeFixture();
+    for (let i = 0; i < 45; i++)
+      await fixture.backend.appendHistoryTurn(nativeUser(`position-race-${i}`));
+    await fixture.backend.flushLocalWrites();
+    const id = fixture.doc.sessionId;
+    await fixture.close();
+    const reopened = await nativeFixture(id);
+    const peer = await nativeFixture(id);
+    const read = NodeLodyHistory.prototype.readProjectedMessagesById;
+    let injected = false;
+    vi.spyOn(NodeLodyHistory.prototype, 'readProjectedMessagesById').mockImplementation(
+      async function (...args) {
+        const result = await read.apply(this, args);
+        if (!injected) {
+          injected = true;
+          await peer.backend.applyHistoryAction({
+            kind: 'user-status',
+            turnId: 'position-race-0',
+            status: 'handled',
+          });
+        }
+        return result;
+      }
+    );
+    expect(await reopened.backend.history.readRange(0, 1)).toMatchObject([
+      { state: 'ready', turn: { id: 'position-race-0', status: 'handled' } },
+    ]);
+    expect(injected).toBe(true);
+    expect(await reopened.backend.readTurn('position-race-0')).toMatchObject({
+      state: 'ready',
+      turn: { status: 'handled' },
+    });
+  });
+
+  it('fences an index-only generation switch during positional hydration without caching the old page', async () => {
+    const id = `native-position-pointer-${ordinal++}`;
+    const root = `lody-session:${id}`;
+    let client: RoostNativeClient | undefined;
+    const onChanges = RoostNativeClient.prototype.onChanges;
+    const capture = vi.spyOn(RoostNativeClient.prototype, 'onChanges').mockImplementation(function (
+      ...args
+    ) {
+      client = this;
+      return onChanges.apply(this, args);
+    });
+    const fixture = await nativeFixture(id);
+    capture.mockRestore();
+    if (!client) throw new Error('Expected Native history owner');
+    for (let i = 0; i < 45; i++)
+      await fixture.backend.appendHistoryTurn(nativeUser(`position-pointer-old-${i}`));
+    await fixture.backend.flushLocalWrites();
+    const seed = await loadRoostOwnerSeedLegacy(join(nativeDirectory, 'history.db'));
+    const generation = new RoostHistoryGeneration(client, Identity.fromSeed(seed).owner(), id);
+    const replacement = nativeUser('position-pointer-new');
+    await generation.replace([replacement], 'position-pointer-activation');
+    const raw = client.stream(root);
+    const pointer = { table: 'lody_history_generation_v1', key: new TextEncoder().encode('next') };
+    const [activation] = await raw.readIndex([pointer]);
+    if (!activation) throw new Error('Expected staged activation proof');
+    // Retain a real sealed activation, but defer its pointer until the read race.
+    await raw.compareAndWriteIndex(
+      [{ ...pointer, value: activation }],
+      [{ ...pointer, value: null }]
+    );
+    await fixture.close();
+    const prepared = await nativeFixture(id);
+    await prepared.backend.readDispatchHistory([]);
+    await prepared.close();
+    let armed = false;
+    vi.spyOn(RoostNativeClient.prototype, 'onChanges').mockImplementation(
+      function (stream, listener, options) {
+        return onChanges.call(
+          this,
+          stream,
+          (cursor, key) => {
+            if (!armed) listener(cursor, key);
+          },
+          options
+        );
+      }
+    );
+    const reopened = await nativeFixture(id);
+    await reopened.backend.flushLocalWrites();
+    const read = NodeLodyHistory.prototype.readProjectedMessagesById;
+    let switched = false;
+    vi.spyOn(NodeLodyHistory.prototype, 'readProjectedMessagesById').mockImplementation(
+      async function (...args) {
+        const result = await read.apply(this, args);
+        if (!switched) {
+          switched = true;
+          const before = await this.observedEventCursor();
+          await this.stream.compareAndWriteIndex(
+            [{ ...pointer, value: null }],
+            [{ ...pointer, value: activation }]
+          );
+          expect(await this.observedEventCursor()).toBe(before);
+        }
+        return result;
+      }
+    );
+    armed = true;
+    expect(await reopened.backend.history.readRange(0, 1)).toMatchObject([
+      { state: 'ready', turn: { id: replacement.id, items: replacement.items } },
+    ]);
+    expect(switched).toBe(true);
+    expect(await reopened.backend.history.readRange(0, 1)).toMatchObject([
+      { state: 'ready', turn: { id: replacement.id, items: replacement.items } },
+    ]);
+    armed = false;
+  });
+
+  it.each(['missing', 'wrong-position', 'uncertified', 'partial'] as const)(
+    'preserves range semantics with a %s position index without forcing a rebuild',
+    async (damage) => {
+      const fixture = await nativeFixture();
+      for (let i = 0; i < 45; i++)
+        await fixture.backend.appendHistoryTurn(nativeUser(`position-fallback-${i}`));
+      await fixture.backend.flushLocalWrites();
+      const id = fixture.doc.sessionId;
+      await fixture.close();
+      const reopened = await nativeFixture(id);
+      await reopened.backend.flushLocalWrites();
+      vi.spyOn(RoostDispatchIndex.prototype, 'rebuild').mockRejectedValue(
+        new Error('Range reads must not force a full-index rebuild')
+      );
+      if (damage === 'uncertified' || damage === 'partial') {
+        vi.spyOn(RoostDispatchIndex.prototype, 'checkpoint').mockResolvedValue(undefined);
+      } else {
+        const range = RoostDispatchIndex.prototype.range;
+        vi.spyOn(RoostDispatchIndex.prototype, 'range').mockImplementationOnce(async function (
+          ...args
+        ) {
+          await this.host.compareAndWriteIndex(
+            [],
+            [
+              {
+                table: 'lody_dispatch_positions_v1',
+                key: new Uint8Array(8),
+                value:
+                  damage === 'missing'
+                    ? null
+                    : new TextEncoder().encode(JSON.stringify('position-fallback-1')),
+              },
+            ]
+          );
+          return range.apply(this, args);
+        });
+      }
+      if (damage === 'partial') {
+        const page = NodeLodyHistory.prototype.readActiveBranchPage;
+        vi.spyOn(NodeLodyHistory.prototype, 'readActiveBranchPage').mockImplementation(
+          async function (...args) {
+            const result = await page.apply(this, args);
+            return args[1]?.before ? { ...result, complete: false, messages: [] } : result;
+          }
+        );
+        await expect(reopened.backend.history.readRange(0, 2)).rejects.toThrow('incomplete');
+        expect(await reopened.backend.readHistoryCount()).toBe(45);
+        expect(await reopened.backend.history.readRange(44, 45)).toMatchObject([
+          { state: 'ready', turn: { id: 'position-fallback-44' } },
+        ]);
+        return;
+      }
+      expect(await reopened.backend.history.readRange(0, 2)).toMatchObject([
+        { state: 'ready', turn: { id: 'position-fallback-0' } },
+        { state: 'ready', turn: { id: 'position-fallback-1' } },
+      ]);
+      expect(await reopened.backend.readHistoryCount()).toBe(45);
+    }
+  );
+
   it('dispatches an old pending input after reopen without materializing historical pages', async () => {
     const fixture = await nativeFixture();
     await fixture.backend.appendHistoryTurn(nativeUser('old-pending-dispatch'));
@@ -4869,7 +5099,9 @@ describe('Production Roost dispatch projection', () => {
         }
       )
     ).rejects.toThrow('Synthetic interrupted projection build');
-    expect(await observer.checkpoint(BigInt(current.header.cursor) + 1n, 1)).toBeUndefined();
+    await expect(observer.range(refreshed, 0, 1)).rejects.toMatchObject({ code: 'stale' });
+    observer.forget();
+    expect(await observer.checkpoint(BigInt(current.header.cursor), 1)).toBeUndefined();
     vi.spyOn(NodeLodyHistory.prototype, 'readActiveBranch').mockRejectedValue(
       new Error('Full branch repair forbidden')
     );
@@ -4877,6 +5109,9 @@ describe('Production Roost dispatch projection', () => {
     expect(await fixture.backend.readDispatchHistory(['dispatch-index-fence'])).toEqual([
       expect.objectContaining({ id: 'dispatch-index-fence', status: 'handled' }),
     ]);
+    const rebuilt = await observer.checkpoint(BigInt(current.header.cursor), 1);
+    if (!rebuilt) throw new Error('Expected rebuilt positional checkpoint');
+    expect(await observer.range(rebuilt, 0, 1)).toEqual([row]);
     vi.restoreAllMocks();
     expect(await fixture.backend.readHistory()).toEqual(stored);
   });

@@ -13,6 +13,7 @@ const marker = { table: 'lody_dispatch_checkpoint_v1', key: new Uint8Array() };
 const rowsTable = 'lody_dispatch_rows_v1';
 const pendingTable = 'lody_dispatch_pending_v1';
 const completedTable = 'lody_dispatch_completed_v1';
+const positionsTable = 'lody_dispatch_positions_v1';
 const utf8 = new TextEncoder();
 const encode = (value: unknown) => utf8.encode(JSON.stringify(value));
 const decode = (bytes: Uint8Array) => JSON.parse(new TextDecoder().decode(bytes)) as unknown;
@@ -58,7 +59,7 @@ const rowSchema = z
   .strict();
 const headerSchema = z
   .object({
-    version: z.literal(1),
+    version: z.literal(2),
     token: z.string().uuid(),
     cursor: z.string().regex(/^(0|[1-9][0-9]*)$/),
     count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -80,6 +81,11 @@ type Plan = {
   changed: RoostDispatchRow[];
 };
 const rowKey = (id: string) => ({ table: rowsTable, key: utf8.encode(id) });
+const positionKey = (position: number) => {
+  const key = new Uint8Array(8);
+  new DataView(key.buffer).setBigUint64(0, BigInt(position));
+  return { table: positionsTable, key };
+};
 const pendingKey = (row: RoostDispatchRow) => {
   const key = new Uint8Array(8 + utf8.encode(row.entry.id).length);
   new DataView(key.buffer).setBigUint64(0, BigInt(row.position));
@@ -168,12 +174,52 @@ export class RoostDispatchIndex {
     return this.remember(row);
   }
 
+  async range(
+    checkpoint: RoostDispatchCheckpoint,
+    from: number,
+    to: number
+  ): Promise<RoostDispatchRow[]> {
+    if (
+      !Number.isSafeInteger(from) ||
+      !Number.isSafeInteger(to) ||
+      from < 0 ||
+      to < from ||
+      to > checkpoint.header.count ||
+      to - from > 500
+    )
+      throw new RangeError('Roost indexed range must contain at most 500 logical rows');
+    const [markerBytes, ...positions] = await this.host.readIndex([
+      marker,
+      ...Array.from({ length: to - from }, (_, offset) => positionKey(from + offset)),
+    ]);
+    if (!markerBytes || !Buffer.from(markerBytes).equals(Buffer.from(checkpoint.bytes)))
+      throw stale();
+    const ids = positions.map((bytes) => {
+      if (!bytes) throw new RoostDispatchIndexCorrupt('Roost position mapping is missing');
+      return z.string().parse(decode(bytes));
+    });
+    const [currentMarker, ...values] = await this.host.readIndex([marker, ...ids.map(rowKey)]);
+    if (!currentMarker || !Buffer.from(currentMarker).equals(Buffer.from(checkpoint.bytes)))
+      throw stale();
+    return values.map((bytes, offset) => {
+      if (!bytes) throw new RoostDispatchIndexCorrupt('Roost indexed range row is missing');
+      const row = rowSchema.parse(decode(bytes));
+      if (row.entry.id !== ids[offset] || row.position !== from + offset)
+        throw new RoostDispatchIndexCorrupt('Roost indexed range identity or position changed');
+      return this.remember(row);
+    });
+  }
+
   private puts(row: RoostDispatchRow, before?: RoostDispatchRow): IndexEntry[] {
     const puts: IndexEntry[] = [];
     if (before && isDispatchCandidate(before.entry))
       puts.push({ ...pendingKey(before), value: null });
     if (before && hasCompletion(before.entry)) puts.push({ ...completionKey(before), value: null });
     puts.push({ ...rowKey(row.entry.id), value: encode(row) });
+    if (!before || before.position !== row.position) {
+      if (before) puts.push({ ...positionKey(before.position), value: null });
+      puts.push({ ...positionKey(row.position), value: encode(row.entry.id) });
+    }
     if (isDispatchCandidate(row.entry))
       puts.push({ ...pendingKey(row), value: encode(row.entry.id) });
     if (hasCompletion(row.entry)) puts.push({ ...completionKey(row), value: encode(row) });
@@ -189,7 +235,10 @@ export class RoostDispatchIndex {
     const changed: RoostDispatchRow[] = [];
     const puts: IndexEntry[] = [];
     for (const update of updates) {
-      if (update.before && sameDispatchEntry(update.before, update.after)) continue;
+      if (update.before && sameDispatchEntry(update.before, update.after) && !update.segments) {
+        const known = this.cached === base ? this.rows.get(update.after.id) : undefined;
+        if (update.position === undefined || known?.position === update.position) continue;
+      }
       const before = await this.row(update.after.id, base);
       const row = rowSchema.parse({
         position: update.position ?? before?.position,
@@ -198,6 +247,18 @@ export class RoostDispatchIndex {
       });
       if (!before && row.position < base.header.count) throw stale();
       if (row.position >= count) throw stale();
+      if (
+        before &&
+        before.position === row.position &&
+        sameDispatchEntry(before.entry, row.entry) &&
+        before.segments.length === row.segments.length &&
+        before.segments.every(
+          (segment, i) =>
+            segment.turnId === row.segments[i]?.turnId &&
+            segment.segmentId === row.segments[i]?.segmentId
+        )
+      )
+        continue;
       puts.push(...this.puts(row, before));
       changed.push(row);
     }
@@ -253,7 +314,7 @@ export class RoostDispatchIndex {
       if (!(await this.host.compareAndWriteIndex([{ ...marker, value: building }], puts)))
         throw stale();
     };
-    for (const table of [rowsTable, pendingTable, completedTable]) {
+    for (const table of [rowsTable, pendingTable, completedTable, positionsTable]) {
       for (;;) {
         const old = await this.host.scanIndex(table, new Uint8Array(), 128n);
         if (!old.length) break;
@@ -270,7 +331,7 @@ export class RoostDispatchIndex {
     }
     if (seen !== count) throw stale();
     await verify();
-    const header: Header = { version: 1, token: randomUUID(), cursor: cursor.toString(), count };
+    const header: Header = { version: 2, token: randomUUID(), cursor: cursor.toString(), count };
     const bytes = encode(header);
     await guarded([{ ...marker, value: bytes }]);
     this.cached = { header, bytes };

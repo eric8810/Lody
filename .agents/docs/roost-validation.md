@@ -12,6 +12,9 @@ records request reduction, paired resource results and retained read-time outlie
 The [Native publication report](../notes/proposed/architecture/2026-10-23-roost-native-publication-boundary.md#final-local-resource-measurements)
 records the coordinated command/head/observer unit, complete resource tables and
 retained RSS-limit failures. These local results do not imply release acceptance.
+The [position paging experiment](../notes/proposed/architecture/2026-10-24-roost-position-paging.md)
+tracks cold positional reads, derived-index maintenance and the index-only
+generation-race regression.
 The [control storage study](../notes/proposed/architecture/2026-10-23-roost-control-storage.md)
 records the minimal notification change and rejected storage experiments. Ordinary
 Roost KV values already have independent compression; check the current source
@@ -35,6 +38,12 @@ record the CI source tree and selected binary hash as well as the SDK revision.
 
 Install Lody from its root with `corepack pnpm install --frozen-lockfile`, following
 the root runtime floor. Run `corepack pnpm run docs status` once at task start.
+In a new clone, first initialize the pinned ACP submodules included in the root
+workspace (core, DSH, Claude, Codex, Devin and Grok). Empty submodule directories
+can let installation succeed while benchmark imports fail. Build core and DSH's
+imported entry points with `corepack pnpm --filter acp-extension-core --filter
+acp-extension-dsh build`; record their gitlinks and generated JS hashes. Kimi/Pi
+remain excluded from the root graph. Missing-import setup failures are not samples.
 For published dependencies, the lockfile is the source of truth. For an unreleased
 matching SDK, prepare Roost in **its own package directories**:
 
@@ -160,6 +169,18 @@ Replace the filename for the other `.mts` entries and use their documented
 | [`roost-dispatch.test.ts`](../../apps/cli/benchmarks/roost-dispatch.test.ts) | Fixed 100/1,000/10,000-message prefixes, actual watcher selection, 20 appends and fresh-process verification | Both sides SQLite WAL/FULL plus per-action control persistence; selected boundary excludes ACP execution, transport and renderer     |
 
 The durable harness has an explicit opt-in config, excluded from default CI.
+The fixed-prefix harness also accepts `LONG_BENCH_STAGE=ranges` after `prepare`.
+Copy a closed prepared seed into an independent directory for each trial. Set
+`LONG_BENCH_DISPATCH=1` and `LONG_BENCH_PREFIX=100`, `1000` or `10000`, and run the
+same opt-in config. This read-only stage reports oldest/middle/quarter 20-row
+position ranges, the first read and nine warm repeats, read-only CPU, RSS trajectory
+and DB/WAL sizes. It verifies selected business content outside the timed read;
+it does not perform the dispatch stage's appends or full-history validation.
+Only the oldest position is the first range outside the latest window in that
+fresh process; traversal may warm the following middle/quarter reads. Their raw
+`coldMs` means first call at that position, not an independent cold-history read.
+Do not label its Loro/large-history outcome as a complete write/recovery result.
+
 Set an absolute, fresh `BENCH_DIR` outside the source checkout. Use the same
 commands/parameters in each measured source checkout, changing only its output
 directory. This example is the **many-message** case:
