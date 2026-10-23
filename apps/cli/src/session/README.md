@@ -415,6 +415,20 @@ Confirmed SDK directory transitions advance local tail membership without reload
 unchanged rows. Foreign work and uncertain results retain authoritative recovery.
 See the [incremental projection investigation](../../../../.agents/notes/proposed/architecture/2026-10-22-roost-owner-incremental-projection.md).
 
+Guarded batch writes compare the bound generation pointer/epoch in the same
+transaction as content and receipts. Exact locally certified content checkpoints
+can install staged overlays, including a proven absent overlay, and carry their
+settled cursor into the next chunk. Publication still polls for later events and
+reloads foreign work. A retained goal value is reusable only for the same host
+and freshly observed cursor. See the
+[append CPU investigation](../../../../.agents/notes/proposed/architecture/2026-10-23-roost-append-cpu-structure.md).
+
+Roost progress retains cursor, revision, count and change hints. Operation identities
+are verified by Native receipts; the control notification does not repeat an
+unused operation ID. Publication order, per-action persistence and the existing
+control schema/readers are retained. See the
+[control storage investigation](../../../../.agents/notes/proposed/architecture/2026-10-23-roost-control-storage.md).
+
 Dispatch reads pending identities, requested turns and completion evidence from
 body-free indexes, then hydrates only the selected input. The complete marker
 must match the authoritative Native event cursor and history count; selection
@@ -452,10 +466,16 @@ the interval cursors. Reads scan bounded event pages and require complete interv
 an unannotated event is never skipped as evidence. Agent v2 identities/digests keep their
 direct index and compare absence inside the content transaction, including receipt-only
 operations with no event advance. Checkpoint tokens and RPC replies are unchanged.
-The owner requires `commit-metadata-v1` and `derived-indexes-v1` and refuses old renderer
-v1/v2 index formats without migration or deletion. Use matching coordinated Native/SDK
-packages; this additive API does not change the v9 container. The Loro control document
-remains a separate publication transaction.
+Session history protocol v3 uses a current Native published head and owner checkpoint
+observation. The head binds scope, cursor, revision, count and the latest logical change;
+eligible body edits commit it with content, compact receipts and derived indexes. RPC
+reads compare scoped checkpoints before and after reading, including across generations.
+Prepared generations have a durable head before activation and continue the prior revision
+under a head CAS. The owner requires `commit-metadata-v1`, `derived-indexes-v1`,
+`receipt-checks-v1` and `commit-observation-v1`; use matching coordinated Native/SDK/CLI
+and renderer builds. This boundary does not change the Native container or wire frames.
+The retired Loro history cursor is neither written nor read for publication. Existing
+experimental control-cursor sessions are refused without migration or deletion.
 
 For eligible published-body edits, the SDK plans its own binding/publication progress
 under settled cursor, identity/member and waiting-dependency comparisons. Native installs
@@ -496,7 +516,7 @@ send intake. Detailed decision and verification:
 
 Initial population and missing or rejected coverage read only the latest coherent window.
 An explicit reset atomically replaces the active cache in the other slot even when its
-control revision is equal or consecutive, provided the captured head has not changed.
+Native publication revision is equal or consecutive, provided the captured head has not changed.
 Last-change hints cannot repair unknown coverage. Older pages load on demand, using a
 checkpoint-protected absolute range where supported; ordinary refresh never sweeps the
 whole history. Genuine reset invalidates old pages until fetched again, including for
@@ -513,7 +533,7 @@ through local `watchChanges` or encrypted remote `session/history-watch`. Public
 wakes the wait immediately; a 15-second deadline bounds idle waits without occupying
 the native Worker or writer queue. Actual body reads acquire bounded read capacity after
 waking, and idle replies transfer no history bodies. Active readers therefore recover
-without relying only on control-cursor hints. Each bridge owns one refresh; release and
+through Native publications, independently of the session control document. Each bridge owns one refresh; release and
 hidden/offline remote views stop new observations. Local IPC remains usable offline.
 [Peer-reader readiness and observation](../../../../.agents/notes/implemented/bug-fix/2026-10-16-roost-peer-reader-readiness.md)
 records the lifecycle, protocol limits and verification.
@@ -677,9 +697,9 @@ use eight concurrent lanes; a lane issues at most one native request at a time.
 Per-item ACP receipts commit with their output and remain discoverable through
 prior generations, so a lost reply or overlapping retry cannot replay a prefix.
 Count and position reads refresh after a lost activation reply. The local write
-barrier republishes the committed projection before RPC binds its control revision;
+barrier republishes the committed projection before RPC binds its Native publication checkpoint;
 it never retries an indeterminate history action.
-External cursor refreshes share the local write queue so an earlier branch read
+External Native commit refreshes share the local write queue so an earlier branch read
 cannot overwrite a later mutation's projection; disposal rejects pending reads.
 Cloud one-shot managers inject owner RPC services and never open a caller-local
 Roost database. The cloud daemon routes per Session: another machine's Sessions use
@@ -779,3 +799,12 @@ A child error with no PID proves that spawn created no process: it still rejects
 the command, but does not make resource identity permanently incomplete. This
 exception matches the actual child error; journal, setup and cleanup failures
 remain uncertain, as do other acquisitions already marked uncertain.
+
+Native commit observation has one acknowledged callback in flight per pooled client;
+stream identities and changed index keys coalesce with bounded memory. The owner watches
+body events plus generation/epoch keys, so its own index-only publication/repair writes do
+not trigger a reload loop. A fresh bootstrap hint closes the private-load/admission gap.
+Observers wait outside the serial Native request lane and never retain a SQLite transaction.
+Unsubscribe does not stop writers. These wakes cover the shared Store owner, not independent
+processes opening the same file. The command RPC reader and renderer resume from their
+persisted scoped checkpoints through the existing `watchChanges` transport.

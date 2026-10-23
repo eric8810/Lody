@@ -69,11 +69,10 @@
 
 ## Lifecycle
 
-- [Roost](README.md#roost-history-paging): owner/backend gate; no keyring/rotation/fallback,
-  removed-history revival, uncertain steer replay, log/receipt pruning.
-  Atomic edits+digests+metadata; agent v2/renderer v3 only; no uncertain retries.
-  SDK: input/permission/branch; local causes; RPC stage/code/ID.
-  Native proofs gate private path reuse and derived goal elision.
+- [Roost](README.md#roost-history-paging): gate owner/backend. No keyring/rotation/fallback,
+  removed-history revival, uncertain steer replay/retry or log/receipt pruning. Atomic edits/digests/metadata;
+  agent v2/renderer v3. SDK owns input/permission/branch; local causes+RPC stage/code/ID.
+  Native proofs gate path reuse/goal read elision; head/watch replaces Loro cursor.
 - `Session.createAgent` gates each ACP spawn; failures reject JSON-RPC. Terminals use protocol argv (`sh -c` for unsplit commands only). Managed Codex reused-refresh startup
   retries once after process cleanup, delay, and live Provider recheck; other auth errors do not.
 - Child tabs reuse parent workspace. No per-session paths in `MachineMeta`:

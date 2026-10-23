@@ -84,6 +84,7 @@ import {
 import { adaptRoostProjectedMessage, encodeRoostContent } from './roost-history-port';
 import { registerSessionBackendFactory } from './session-backend';
 import { RoostHistoryGeneration } from './roost-history-generation';
+import { RoostHistoryHead } from './roost-history-head';
 import {
   RoostDispatchIndex,
   RoostDispatchIndexCorrupt,
@@ -183,9 +184,13 @@ const acquireOwnerUnlocked = async (options: RoostNativeOptions): Promise<OwnerL
     await client.ready;
     if (
       !client.capabilities.includes('commit-metadata-v1') ||
-      !client.capabilities.includes('derived-indexes-v1')
+      !client.capabilities.includes('derived-indexes-v1') ||
+      !client.capabilities.includes('receipt-checks-v1') ||
+      !client.capabilities.includes('commit-observation-v1')
     )
-      throw new Error('Roost Native atomic checkpoint support is required; update the CLI package');
+      throw new Error(
+        'Roost Native atomic publication support is required; update the CLI package'
+      );
   } catch (error) {
     reportRoostHistoryFailure(error, { stage: 'initialize' });
     await client.close().catch(() => undefined);
@@ -280,6 +285,7 @@ const createNodeServicesForLease = async (
     throw new Error('Roost SDK lacks incremental directory support; install a matching SDK build');
   await historyGeneration.resolve();
   let historyHost = historyGeneration.host;
+  let historyScope = historyGeneration.observationScope;
   let roostHistory = historyGeneration.history;
   await roostHistory.catchUpIndex();
   await roostHistory.recoverPendingBatches();
@@ -315,6 +321,11 @@ const createNodeServicesForLease = async (
   let goalProjection: RoostGoalProjection | undefined;
   let goalCoveredStart = 0;
   let needsRefresh = false;
+  const publication = new RoostHistoryHead(
+    () => historyHost,
+    () => historyScope
+  );
+  let refreshCommitSubscription = () => {};
   const dispatchIndexes = new WeakMap<RoostNodeStream, RoostDispatchIndex>();
   const dispatchIndex = () => {
     let index = dispatchIndexes.get(historyHost);
@@ -341,7 +352,7 @@ const createNodeServicesForLease = async (
 
   const historyChanges = createRoostHistoryChanges(
     () => historyHost,
-    () => historyGeneration.observationScope
+    () => historyScope
   );
   const pendingChangedIds = new Set<string>();
   let pendingStructuralFrom: number | undefined;
@@ -742,6 +753,8 @@ const createNodeServicesForLease = async (
     }
     roostHistory = historyGeneration.history;
     historyHost = historyGeneration.host;
+    historyScope = historyGeneration.observationScope;
+    refreshCommitSubscription();
     stateCache.clear();
     permissionCache.clear();
     readGeneration += 1;
@@ -752,6 +765,8 @@ const createNodeServicesForLease = async (
     const previousEntries = entries;
     const previousStart = loadedStartPosition;
     const cursor = await roostHistory.observedEventCursor();
+    const publicationFence = await roostHistory.publicationFence(cursor);
+    await publication.read();
     const nextBranch = await roostHistory.readActiveBranchPage(viewId, {
       latest: true,
       limit: branchPageSize,
@@ -773,6 +788,14 @@ const createNodeServicesForLease = async (
     }
     installBranchWindow(nextBranch, projected, nextRows);
     knownCursor = cursor;
+    if (operationCursor === undefined)
+      await publication.publish(
+        cursor,
+        totalHistoryCount,
+        { kind: 'structure', from: 0, to: totalHistoryCount },
+        publicationFence
+      );
+    else if (!publication.current()) await publication.read();
     goalCoveredStart = totalHistoryCount;
     goalProjection =
       preservedGoal === undefined
@@ -798,7 +821,25 @@ const createNodeServicesForLease = async (
   };
 
   const reloadBranch = async (options: { readonly publish?: boolean } = {}) => {
-    const next = reloadPromise ?? performBranchReload();
+    const next =
+      reloadPromise ??
+      (async () => {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await performBranchReload();
+          } catch (error) {
+            // Only projection/publication is retried. The original history action
+            // is never replayed by this repair path.
+            if (
+              attempt >= 2 ||
+              !(error instanceof Error) ||
+              !('code' in error) ||
+              error.code !== 'stale'
+            )
+              throw error;
+          }
+        }
+      })();
     reloadPromise = next;
     try {
       const change = await next;
@@ -893,47 +934,85 @@ const createNodeServicesForLease = async (
 
   await reloadBranch();
 
-  const storedCursor = await sessionDoc.getRoostHistoryCursor();
-  if (!Number.isSafeInteger(storedCursor?.historyRevision)) {
-    const observedCursor = await roostHistory.observedEventCursor();
-    await sessionDoc.setRoostHistoryCursor({
-      cursor: storedCursor?.cursor ?? observedCursor.toString(),
-      ...(storedCursor?.operationId ? { operationId: storedCursor.operationId } : {}),
-      historyRevision: 0,
-      historyCount: totalHistoryCount,
-      historyChangeJson: 'null',
-    });
-  }
-  let observedHistoryRevision = Number.isSafeInteger(storedCursor?.historyRevision)
-    ? storedCursor!.historyRevision!
-    : 0;
-
-  // Ignore unrelated control writes and refresh only for another history owner.
-  // Queue refreshes with writes so a pending branch read cannot install an old
-  // window after a newer local mutation has published its projection.
-  const unsubscribeControl = sessionDoc.subscribeRoostHistoryCursor(() => {
-    if (disposed) return;
+  let watchedStream: string | undefined;
+  let unsubscribeCommits = () => {};
+  let pendingCommitHint:
+    | { stream: string; cursor: bigint | null; indexChange: boolean }
+    | undefined;
+  let commitRefreshQueued = false;
+  const queueCommitRefresh = () => {
+    if (commitRefreshQueued || !pendingCommitHint || closing || disposed) return;
+    commitRefreshQueued = true;
     const next = writeSerial.then(async () => {
-      if (disposed) return;
-      const cursor = await sessionDoc.getRoostHistoryCursor();
+      const hint = pendingCommitHint;
+      pendingCommitHint = undefined;
+      if (!hint || disposed || closing || watchedStream !== hint.stream) return;
+      const generationChanged = hint.indexChange && (await historyGeneration.resolve());
+      const before = publication.current();
       if (
-        disposed ||
-        cursor?.historyRevision === undefined ||
-        cursor.historyRevision <= observedHistoryRevision
-      ) {
+        !generationChanged &&
+        hint.cursor !== null &&
+        before &&
+        BigInt(before.cursor) >= hint.cursor &&
+        !needsRefresh
+      )
         return;
-      }
       await reloadBranch();
-      observedHistoryRevision = cursor.historyRevision;
+      needsRefresh = false;
+      const after = publication.current();
+      // A window diff cannot invalidate an older loaded page. One certified
+      // publication can supply its complete hint; a coalesced/foreign interval
+      // conservatively resets membership and bodies without reading old pages.
+      const completeHint =
+        before &&
+        after?.scope === before.scope &&
+        after.historyRevision === before.historyRevision + 1
+          ? after.change
+          : undefined;
+      notifyHistoryChange(completeHint ?? { kind: 'structure', from: 0, to: totalHistoryCount });
+      for (const wake of checkpointObservers) wake();
       if (pendingModelSummary) {
         await syncModelSummary?.();
         pendingModelSummary = false;
       }
     });
-    writeSerial = next.catch((error) => {
+    const settled = next.catch((error) => {
+      needsRefresh = true;
+      for (const wake of checkpointObservers) wake();
       console.error(`Roost session history refresh failed for ${viewId}`, error);
     });
-  });
+    writeSerial = settled;
+    void settled.then(() => {
+      commitRefreshQueued = false;
+      if (!closing && !disposed) queueCommitRefresh();
+    });
+  };
+  refreshCommitSubscription = () => {
+    if (closing || disposed) return;
+    const stream = historyGeneration.observationStream;
+    if (watchedStream === stream) return;
+    unsubscribeCommits();
+    pendingCommitHint = undefined;
+    watchedStream = stream;
+    unsubscribeCommits = lease.client.onChanges(
+      stream,
+      (cursor, indexChange) => {
+        if (disposed || closing || watchedStream !== stream) return;
+        if (!pendingCommitHint) pendingCommitHint = { stream, cursor, indexChange };
+        else {
+          pendingCommitHint.indexChange ||= indexChange;
+          pendingCommitHint.cursor =
+            pendingCommitHint.cursor === null || cursor === null
+              ? null
+              : pendingCommitHint.cursor > cursor
+                ? pendingCommitHint.cursor
+                : cursor;
+        }
+        queueCommitRefresh();
+      },
+      { indexKeys: historyGeneration.observationIndexKeys }
+    );
+  };
 
   const readyTurn = (turn: SessionEntry): SessionTurnRead => ({
     state: 'ready',
@@ -945,8 +1024,12 @@ const createNodeServicesForLease = async (
     });
   const publishedNativeCursor = async (): Promise<bigint> => {
     const cursor = await roostHistory.observedEventCursor();
-    const published = await sessionDoc.getRoostHistoryCursor();
-    if (published?.cursor !== cursor.toString()) {
+    const published = await publication.read();
+    if (
+      published?.cursor !== cursor.toString() ||
+      knownCursor !== cursor ||
+      published.historyCount !== totalHistoryCount
+    ) {
       if (operationCursor === undefined) {
         needsRefresh = true;
         recordChange({ kind: 'structure', from: 0, to: totalHistoryCount });
@@ -1089,6 +1172,20 @@ const createNodeServicesForLease = async (
         signal?.removeEventListener('abort', wake);
       }
     },
+    getPublication: () =>
+      readStable(async () => {
+        const cursor = await publishedNativeCursor();
+        const head = publication.current()!;
+        return {
+          checkpoint: await historyChanges.checkpoint(cursor),
+          historyRevision: head.historyRevision,
+          historyCount: head.historyCount,
+          historyChange:
+            head.change?.kind === 'changed'
+              ? { kind: 'changed' as const, ids: [...head.change.businessIds] }
+              : head.change,
+        };
+      }),
     getCheckpoint: () =>
       readStable(async () => historyChanges.checkpoint(await publishedNativeCursor())),
     readChanges: (checkpoint, options) =>
@@ -1364,12 +1461,15 @@ const createNodeServicesForLease = async (
     | { host: RoostNodeStream; cursor: bigint; latest: RoostGoalProjection }
     | undefined;
   const publishCursor = async (
-    operationId: string,
     commandStartCursor: bigint,
     verifyGoalCursor?: (cursor: bigint) => Promise<boolean>,
     metadataCovered?: (cursor: bigint) => boolean
   ): Promise<void> => {
-    const cursor = await roostHistory.observedEventCursor();
+    const settled = historyGeneration.settledWriteCursor();
+    const cursor =
+      settled !== undefined && publication.current()?.cursor === settled.toString()
+        ? settled
+        : await roostHistory.observedEventCursor();
     const owned = verifyGoalCursor && (await verifyGoalCursor(cursor).catch(() => false));
     if (verifyGoalCursor && !owned) {
       // Do not label an externally changed window as current merely because
@@ -1430,27 +1530,18 @@ const createNodeServicesForLease = async (
         Boolean(owned),
         [...pendingChangedIds]
       );
-    const previous = await sessionDoc.getRoostHistoryCursor();
-    const historyRevision = (previous?.historyRevision ?? 0) + 1;
-    if (!Number.isSafeInteger(historyRevision)) {
-      throw new Error(`Roost history revision overflow for ${viewId}`);
-    }
-    await sessionDoc.setRoostHistoryCursor({
-      cursor: cursor.toString(),
-      operationId,
-      historyRevision,
-      historyCount: totalHistoryCount,
-      historyChangeJson: JSON.stringify(
-        change
-          ? change.kind === 'changed'
-            ? { kind: 'changed', ids: change.businessIds }
-            : change
-          : null
-      ),
-    });
+    if (
+      publication.current()?.cursor !== cursor.toString() ||
+      publication.current()?.historyCount !== totalHistoryCount
+    )
+      await publication.publish(
+        cursor,
+        totalHistoryCount,
+        change,
+        await roostHistory.publicationFence(cursor)
+      );
     knownCursor = cursor;
     for (const wake of checkpointObservers) wake();
-    observedHistoryRevision = Math.max(observedHistoryRevision, historyRevision);
     if (pendingChange === change) {
       pendingChange = undefined;
       pendingChangedIds.clear();
@@ -1465,21 +1556,31 @@ const createNodeServicesForLease = async (
 
   const withWrites = async (
     operationId: string,
-    operation: () => Promise<boolean | void>
+    operation: () => Promise<boolean | void>,
+    // Only receipt-backed immutable commands may recover partial durable work.
+    idempotent?: { optimistic: boolean }
   ): Promise<void> => {
     if (closing || disposed) throw new Error('Roost session backend is disposed');
     const next = writeSerial.then(async () => {
       for (let attempt = 0; ; attempt += 1) {
         let evidence: ReturnType<RoostHistoryGeneration['trackWrites']> | undefined;
+        let operationCompleted = false;
         try {
-          committedGoal = undefined;
           pendingDispatchUpdates.clear();
-          await historyGeneration.resolve();
+          const warm = Boolean(
+            idempotent?.optimistic &&
+            !needsRefresh &&
+            !reloadPromise &&
+            windowHistory === historyGeneration.history &&
+            knownCursor !== undefined &&
+            publication.current()?.cursor === knownCursor.toString()
+          );
+          if (!warm) await historyGeneration.resolve();
           if (needsRefresh || reloadPromise || windowHistory !== historyGeneration.history) {
             await reloadBranch({ publish: true });
             needsRefresh = false;
           }
-          let cursor = await roostHistory.observedEventCursor();
+          let cursor = warm ? knownCursor! : await roostHistory.observedEventCursor();
           if (knownCursor !== undefined && knownCursor !== cursor) {
             await reloadBranch({ publish: true });
             cursor = await roostHistory.observedEventCursor();
@@ -1491,18 +1592,52 @@ const createNodeServicesForLease = async (
           goalProjection =
             totalHistoryCount === 0
               ? null
-              : await readGoalProjection(historyHost, cursor, totalHistoryCount).catch(
-                  () => undefined
-                );
+              : committedGoal?.host === historyHost && committedGoal.cursor === cursor
+                ? clone(committedGoal.latest)
+                : await readGoalProjection(historyHost, cursor, totalHistoryCount).catch(
+                    () => undefined
+                  );
           const changed = await operation();
-          if (changed !== false || pendingChange || pendingModelSummary)
-            await publishCursor(operationId, cursor, evidence.verify, evidence.metadataCovered);
+          operationCompleted = true;
+          if (changed !== false || pendingChange || pendingModelSummary) {
+            for (let publicationAttempt = 0; ; publicationAttempt++) {
+              try {
+                await publishCursor(cursor, evidence.verify, evidence.metadataCovered);
+                break;
+              } catch (error) {
+                if (
+                  !(error instanceof Error) ||
+                  !('code' in error) ||
+                  error.code !== 'stale' ||
+                  publicationAttempt >= 2
+                )
+                  throw error;
+                // The action is already applied. Only repair its observation;
+                // rerunning an append here would duplicate durable content.
+                needsRefresh = true;
+                goalProjection = undefined;
+                await reloadBranch({ publish: true });
+              }
+            }
+          }
           return;
-        } catch (error) {
+        } catch (failure) {
+          const committed = operationCompleted || (!idempotent && evidence?.hasCommitted());
+          const error =
+            committed && failure instanceof Error && 'code' in failure && failure.code === 'stale'
+              ? Object.assign(
+                  new Error('Roost history observation could not safely retry after durable work', {
+                    cause: failure,
+                  }),
+                  { code: operationCompleted ? 'publication_stale' : 'write_stale' }
+                )
+              : failure;
+          committedGoal = undefined;
           dispatchIndex().forget();
           operationCursor = undefined;
           needsRefresh = true;
           const stale = error instanceof Error && 'code' in error && error.code === 'stale';
+          if (idempotent) idempotent.optimistic = false;
           if (!stale || attempt >= 2) {
             reportRoostHistoryFailure(error, {
               stage: 'write',
@@ -1511,14 +1646,9 @@ const createNodeServicesForLease = async (
             });
             throw error;
           }
-          const cursor = await sessionDoc.getRoostHistoryCursor();
-          if (Number.isSafeInteger(cursor?.historyRevision)) {
-            observedHistoryRevision = Math.max(observedHistoryRevision, cursor!.historyRevision!);
-          }
           await reloadBranch({ publish: true });
           needsRefresh = false;
         } finally {
-          committedGoal = undefined;
           evidence?.stop();
           operationCursor = undefined;
           pendingDispatchUpdates.clear();
@@ -1666,9 +1796,11 @@ const createNodeServicesForLease = async (
     for (const key of stateCache.keys()) {
       if (ids.has(key.slice(0, key.indexOf('\u0000')))) stateCache.delete(key);
     }
+    // Exact local commit evidence covers the preflight overlay lookup too,
+    // including its absence. Unknown/foreign intervals never supply `staged`.
     for (const value of staged?.values() ?? [])
-      if (value.state)
-        stateCache.set(identityKey(stateIdentity(value.message)), Promise.resolve(value.state));
+      stateCache.set(identityKey(stateIdentity(value.message)), Promise.resolve(value.state));
+    while (stateCache.size > 500) stateCache.delete(stateCache.keys().next().value!);
     for (const id of ids) {
       const cached = pageEntries.get(id);
       if (cached) pageIdsByPosition.delete(cached.position);
@@ -1960,19 +2092,64 @@ const createNodeServicesForLease = async (
           ? await dispatch.plan(dispatchBase, through, totalHistoryCount, dispatchUpdates)
           : undefined;
       const dispatchPuts = dispatchPlan ? dispatch.derivedPuts(dispatchPlan) : undefined;
-      const commit = await historyGeneration.commitPatches(
-        patchWrites,
-        patchReceipts,
-        operationCursor,
-        patchIds,
-        [
-          ...(stagedGoal !== undefined && through !== undefined
-            ? [goalProjectionPut(through, stagedGoal)]
-            : []),
-          ...(dispatchPuts ?? []),
-        ],
-        dispatchPlan && dispatchPuts ? [dispatch.expected(dispatchPlan)] : []
-      );
+      const publicationChange =
+        pendingChange?.kind === 'structure'
+          ? pendingChange
+          : {
+              kind: 'changed' as const,
+              businessIds: [...new Set([...(pendingChange?.businessIds ?? []), ...patchIds])],
+            };
+      const headPlan =
+        through === undefined
+          ? undefined
+          : publication.plan(
+              through,
+              totalHistoryCount,
+              publicationChange.kind === 'changed' && !publicationChange.businessIds.length
+                ? undefined
+                : publicationChange
+            );
+      const commit = await historyGeneration
+        .commitPatches(
+          patchWrites,
+          patchReceipts,
+          operationCursor,
+          patchIds,
+          [
+            ...(stagedGoal !== undefined && through !== undefined
+              ? [goalProjectionPut(through, stagedGoal)]
+              : []),
+            ...(dispatchPuts ?? []),
+            ...(headPlan ? [headPlan.put] : []),
+          ],
+          [
+            ...(dispatchPlan && dispatchPuts ? [dispatch.expected(dispatchPlan)] : []),
+            ...(headPlan ? [headPlan.expected] : []),
+          ],
+          extra.flatMap((command) => (command.type === 'accept' ? [command.identity] : []))
+        )
+        .catch((error) => {
+          if (
+            patchReceipts.length &&
+            error instanceof Error &&
+            'code' in error &&
+            error.code === 'conflict'
+          )
+            throw Object.assign(new Error('Agent operation identity conflict', { cause: error }), {
+              code: 'conflict',
+            });
+          throw error;
+        });
+      // Native returns an atomic no-op when any batch item was committed before.
+      // Recover/filter receipts before replanning; never install the staged delta.
+      if (commit.replayed?.some(Boolean)) throw staleRead();
+      if (
+        headPlan &&
+        commit.derivedIndexesApplied &&
+        commit.before === operationCursor &&
+        commit.through === through
+      )
+        publication.accept(headPlan);
       if (
         dispatchPlan &&
         dispatchPuts &&
@@ -2363,6 +2540,7 @@ const createNodeServicesForLease = async (
             );
             roostHistory = historyGeneration.history;
             historyHost = historyGeneration.host;
+            historyScope = historyGeneration.observationScope;
             if (replacement.finished === true) await finishIfNeeded(accepted.turnId);
             await reloadBranch({ publish: true });
             if (goalProjection && goalProjection.position >= start) goalProjection = undefined;
@@ -2587,92 +2765,108 @@ const createNodeServicesForLease = async (
         digest: operationDigest([event, input.targetAssistantEntryId, input.model]),
       }));
       const operationId = `agent:${operationDigest(identified.map((event) => event.id))}`;
-      await withWrites(operationId, async () => {
-        // Each small chunk owns its output and per-item receipts in one native
-        // transaction. A retry can safely overlap an earlier committed chunk.
-        let anyChanged = false;
-        for (let offset = 0; offset < identified.length; offset += 30) {
-          const pending: typeof identified = [];
-          const receipts: HistoryBatchCommand[] = [];
-          let recovered = false;
-          for (const event of identified.slice(offset, offset + 30)) {
-            const identity = {
-              kind: 'publication' as const,
-              businessId: viewId,
-              segmentId: `agent:${operationDigest(event.id)}`,
-            };
-            const prior = await historyGeneration.lookupOperation(identity);
-            if (prior !== undefined) {
-              if (!record(prior) || prior.digest !== event.digest)
-                throw new Error('Agent operation identity conflict');
-              recovered = true;
-              continue;
+      const idempotent = {
+        optimistic: Boolean(
+          input.targetAssistantEntryId &&
+          (positionById.has(input.targetAssistantEntryId) ||
+            pageEntries.has(input.targetAssistantEntryId))
+        ),
+      };
+      await withWrites(
+        operationId,
+        async () => {
+          // Each small chunk owns its output and per-item receipts in one native
+          // transaction. A retry can safely overlap an earlier committed chunk.
+          let anyChanged = false;
+          for (let offset = 0; offset < identified.length; offset += 30) {
+            const pending: typeof identified = [];
+            const receipts: HistoryBatchCommand[] = [];
+            let recovered = false;
+            for (const event of identified.slice(offset, offset + 30)) {
+              const identity = {
+                kind: 'publication' as const,
+                businessId: viewId,
+                segmentId: `agent:${operationDigest(event.id)}`,
+              };
+              const prior = idempotent.optimistic
+                ? undefined
+                : await historyGeneration.lookupOperation(identity);
+              if (prior !== undefined) {
+                if (!record(prior) || prior.digest !== event.digest)
+                  throw new Error('Agent operation identity conflict');
+                recovered = true;
+                continue;
+              }
+              pending.push(event);
+              receipts.push({
+                type: 'accept',
+                identity,
+                parents: [],
+                content: encodeRoostContent({ digest: event.digest }),
+              });
             }
-            pending.push(event);
-            receipts.push({
-              type: 'accept',
-              identity,
-              parents: [],
-              content: encodeRoostContent({ digest: event.digest }),
-            });
-          }
-          if (recovered) {
-            await reloadBranch({ publish: true });
-            anyChanged = true;
-          }
-          if (!pending.length) continue;
-          const position = input.targetAssistantEntryId
-            ? positionById.get(input.targetAssistantEntryId)
-            : undefined;
-          const cached =
-            position !== undefined
-              ? entries[position]
-              : input.targetAssistantEntryId
-                ? pageEntries.get(input.targetAssistantEntryId)?.turn
-                : undefined;
-          const selected = cached
-            ? { state: 'ready' as const, turn: cached }
-            : input.targetAssistantEntryId
-              ? await readPrivateTurn(input.targetAssistantEntryId)
+            if (recovered) {
+              await reloadBranch({ publish: true });
+              anyChanged = true;
+            }
+            if (!pending.length) continue;
+            const position = input.targetAssistantEntryId
+              ? positionById.get(input.targetAssistantEntryId)
               : undefined;
-          const before = input.targetAssistantEntryId
-            ? selected?.state === 'ready' && selected.turn.role === 'assistant'
-              ? [selected.turn as SessionHistoryInput]
-              : []
-            : await readAll();
-          const planned = planAgentHistoryMutation(before, pending, input.model, {
-            ...(input.createId ? { createId: input.createId } : {}),
-            ...(input.now ? { now: input.now } : {}),
-            ...(input.targetAssistantEntryId
-              ? { targetAssistantEntryId: input.targetAssistantEntryId }
-              : {}),
-          });
-          const next = planned.history;
-          if (
-            next.length === before.length &&
-            next.every((entry, index) => entry.id === before[index]?.id)
-          ) {
-            await commitTurnChanges(
-              before,
-              next,
-              operationId,
-              receipts,
-              planned.textAppends,
-              planned.changes
-            );
-          } else {
-            const all = await readAll();
-            const changed = new Map(next.map((entry) => [entry.id, entry]));
-            const combined = all.map((entry) => changed.get(entry.id) ?? entry);
-            for (const entry of next)
-              if (!all.some((old) => old.id === entry.id)) combined.push(entry);
-            await replaceActiveHistory(combined, operationId, receipts);
+            const cached =
+              position !== undefined
+                ? entries[position]
+                : input.targetAssistantEntryId
+                  ? pageEntries.get(input.targetAssistantEntryId)?.turn
+                  : undefined;
+            const selected = cached
+              ? { state: 'ready' as const, turn: cached }
+              : input.targetAssistantEntryId
+                ? await readPrivateTurn(input.targetAssistantEntryId)
+                : undefined;
+            const before = input.targetAssistantEntryId
+              ? selected?.state === 'ready' && selected.turn.role === 'assistant'
+                ? [selected.turn as SessionHistoryInput]
+                : []
+              : await readAll();
+            const planned = planAgentHistoryMutation(before, pending, input.model, {
+              ...(input.createId ? { createId: input.createId } : {}),
+              ...(input.now ? { now: input.now } : {}),
+              ...(input.targetAssistantEntryId
+                ? { targetAssistantEntryId: input.targetAssistantEntryId }
+                : {}),
+            });
+            const next = planned.history;
+            if (
+              next.length === before.length &&
+              next.every((entry, index) => entry.id === before[index]?.id)
+            ) {
+              await commitTurnChanges(
+                before,
+                next,
+                operationId,
+                receipts,
+                planned.textAppends,
+                planned.changes
+              );
+            } else {
+              const all = await readAll();
+              const changed = new Map(next.map((entry) => [entry.id, entry]));
+              const combined = all.map((entry) => changed.get(entry.id) ?? entry);
+              for (const entry of next)
+                if (!all.some((old) => old.id === entry.id)) combined.push(entry);
+              await replaceActiveHistory(combined, operationId, receipts);
+            }
+            anyChanged = true;
+            // An applied SDK checkpoint certifies this command's exact interval.
+            // Later commits arrive through the independent Native wake channel.
+            operationCursor =
+              historyGeneration.settledWriteCursor() ?? (await roostHistory.observedEventCursor());
           }
-          anyChanged = true;
-          operationCursor = await roostHistory.observedEventCursor();
-        }
-        return anyChanged;
-      });
+          return anyChanged;
+        },
+        idempotent
+      );
     },
   };
 
@@ -2703,63 +2897,70 @@ const createNodeServicesForLease = async (
     dispatch = false
   ): Promise<SessionInputAcceptanceResult> => {
     const identity = inputIdentity(entry);
-    await withWrites(identity.operationId, async () => {
-      // Receipt identity is checked before authoring trusted human provenance.
-      const prior = await historyGeneration.lookupInputAcceptance(identity);
-      let created = false;
-      if (dispatch && prior) {
-        const current = await readPrivateTurn(entry.id);
-        if (
-          current.state === 'missing' ||
-          (current.state === 'ready' && !isSessionHistoryStatusAwaitingStart(current.turn.status))
-        )
-          return false;
-        if (current.state !== 'ready')
-          throw new Error('Accepted Roost input history is not readable');
-      }
-      if (dispatch) {
-        const userId = entry.userId?.trim();
-        if (!userId)
-          throw new HistoryWriteError([{ path: ['userId'], code: 'invalid_user_input' }]);
-        const existing = (await sessionDoc.getDocState())?.humanInputReceipts?.[entry.id];
-        if (existing && existing.userId !== userId)
-          throw new HistoryWriteError([{ path: ['userId'], code: 'input_identity_conflict' }]);
-        sessionDoc.recordHumanInputReceipt(entry.id, userId);
-      }
-      if (!prior) {
-        const branch = await ensureHeadSealed();
-        const accepted = await roostHistory.acceptInputToView({
-          ...identity,
-          expectedRevision: branch.state.revision,
-          expectedHead: branch.state.head,
-          input: { ...identity.input, parents: await parentForHead(branch) },
-        });
-        created = accepted.created;
-        await refreshProjectedMessage(accepted.turnId, accepted);
-        if (entry.finished === true) await finishIfNeeded(accepted.turnId);
-      }
-      if (dispatch) {
-        const current = await readPrivateTurn(entry.id);
-        if (current.state !== 'ready' && current.state !== 'missing')
-          throw new Error('Accepted Roost input history is not readable');
-        if (current.state === 'ready' && isSessionHistoryStatusAwaitingStart(current.turn.status)) {
-          const latest = await readLatestTurn(history, 'user');
-          const meta = await sessionDoc.getMetaState();
+    await withWrites(
+      identity.operationId,
+      async () => {
+        // Receipt identity is checked before authoring trusted human provenance.
+        const prior = await historyGeneration.lookupInputAcceptance(identity);
+        let created = false;
+        if (dispatch && prior) {
+          const current = await readPrivateTurn(entry.id);
           if (
-            meta &&
-            !meta.isArchived &&
-            meta.lastMissingHistoryUserMsgId !== entry.id &&
-            meta.lastHandledUserMsgId !== entry.id
+            current.state === 'missing' ||
+            (current.state === 'ready' && !isSessionHistoryStatusAwaitingStart(current.turn.status))
+          )
+            return false;
+          if (current.state !== 'ready')
+            throw new Error('Accepted Roost input history is not readable');
+        }
+        if (dispatch) {
+          const userId = entry.userId?.trim();
+          if (!userId)
+            throw new HistoryWriteError([{ path: ['userId'], code: 'invalid_user_input' }]);
+          const existing = (await sessionDoc.getDocState())?.humanInputReceipts?.[entry.id];
+          if (existing && existing.userId !== userId)
+            throw new HistoryWriteError([{ path: ['userId'], code: 'input_identity_conflict' }]);
+          sessionDoc.recordHumanInputReceipt(entry.id, userId);
+        }
+        if (!prior) {
+          const branch = await ensureHeadSealed();
+          const accepted = await roostHistory.acceptInputToView({
+            ...identity,
+            expectedRevision: branch.state.revision,
+            expectedHead: branch.state.head,
+            input: { ...identity.input, parents: await parentForHead(branch) },
+          });
+          created = accepted.created;
+          await refreshProjectedMessage(accepted.turnId, accepted);
+          if (entry.finished === true) await finishIfNeeded(accepted.turnId);
+        }
+        if (dispatch) {
+          const current = await readPrivateTurn(entry.id);
+          if (current.state !== 'ready' && current.state !== 'missing')
+            throw new Error('Accepted Roost input history is not readable');
+          if (
+            current.state === 'ready' &&
+            isSessionHistoryStatusAwaitingStart(current.turn.status)
           ) {
-            // The existing writer queue orders this check and activation with
-            // every competing accept. A recovered older input cannot move it back.
-            if (latest?.id === entry.id && meta.latestUserMsgId !== entry.id)
-              await sessionDoc.publishUserTurnActivation(entry.id);
+            const latest = await readLatestTurn(history, 'user');
+            const meta = await sessionDoc.getMetaState();
+            if (
+              meta &&
+              !meta.isArchived &&
+              meta.lastMissingHistoryUserMsgId !== entry.id &&
+              meta.lastHandledUserMsgId !== entry.id
+            ) {
+              // The existing writer queue orders this check and activation with
+              // every competing accept. A recovered older input cannot move it back.
+              if (latest?.id === entry.id && meta.latestUserMsgId !== entry.id)
+                await sessionDoc.publishUserTurnActivation(entry.id);
+            }
           }
         }
-      }
-      return created;
-    });
+        return created;
+      },
+      { optimistic: false }
+    );
     return { status: 'accepted', turnId: entry.id, active: await inputIsActive(entry.id) };
   };
   const inputAcceptance: import('@lody/shared/session-data').SessionInputAcceptance = {
@@ -2794,11 +2995,14 @@ const createNodeServicesForLease = async (
     await Promise.all([...pendingSeen.values()]);
     if (needsRefresh || pendingChange || pendingModelSummary) {
       // Recover the projection of an already committed mutation, never replay
-      // the failed action. RPC reads must bind it to a durable control revision.
+      // the failed action. RPC reads bind it to the durable Native publication.
       await withWrites(`projection-recovery:${randomBytes(8).toString('hex')}`, async () => false);
     }
   };
 
+  // Admission follows registration. Its fresh bootstrap hint checks the gap
+  // after the private initial load; no consumer checkpoint has been exposed yet.
+  refreshCommitSubscription();
   return {
     sessionData,
     readDispatchHistory: async (ids) => (await readDispatch(ids)).history,
@@ -2823,7 +3027,7 @@ const createNodeServicesForLease = async (
     dispose: async () => {
       closing = true;
       for (const wake of checkpointObservers) wake();
-      unsubscribeControl();
+      unsubscribeCommits();
       try {
         await Promise.allSettled([...pendingSeen.values()]);
         await writeSerial;
@@ -2844,6 +3048,8 @@ const createNodeServices = async (
 ) => {
   let lease: OwnerLease | undefined;
   try {
+    if (sessionDoc.handle?.doc.getByPath('roostHistoryCursor/cursor') !== undefined)
+      throw new Error('Unsupported Roost control publication format; create a new test session');
     lease = await acquireOwner(ownerOptions);
     return await createNodeServicesForLease(sessionDoc, lease);
   } catch (error) {

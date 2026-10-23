@@ -21,6 +21,7 @@ import type { SessionHistoryInput } from '@lody/shared';
 import { encodeRoostContent } from './roost-history-port';
 import { AGENT_RECEIPTS_TABLE, agentReceiptKey, decodeAgentReceipt } from './roost-content-patches';
 import { roostCommitMetadata } from './roost-history-changes';
+import { ROOST_HEAD_KEY, decodeRoostHead, encodeRoostHead } from './roost-history-head';
 
 const nextKey = { table: 'lody_history_generation_v1', key: new TextEncoder().encode('next') };
 const epochKey = { table: 'lody_history_epoch_v1', key: new TextEncoder().encode('current') };
@@ -32,6 +33,7 @@ type WriteEvidence = {
   updates: Map<string, number>;
   indexes: Map<string, number>;
   metadataThrough: bigint | undefined;
+  settledThrough: bigint | undefined;
 };
 const updateKey = (id: Uint8Array, seq: bigint) => `${Buffer.from(id).toString('hex')}:${seq}`;
 const indexKey = (table: string, key: Uint8Array) => `${table}:${Buffer.from(key).toString('hex')}`;
@@ -70,6 +72,14 @@ export class RoostHistoryGeneration {
     return createHash('sha256').update(this.owner).update(this.streamId).digest('hex');
   }
 
+  get observationStream(): string {
+    return this.streamId;
+  }
+
+  get observationIndexKeys() {
+    return [nextKey, epochKey];
+  }
+
   get host(): RoostNodeStream {
     return this.history.stream as RoostNodeStream;
   }
@@ -80,10 +90,12 @@ export class RoostHistoryGeneration {
     cursor: bigint | undefined,
     changedIds: readonly string[],
     derivedIndexPuts: IndexPut[] = [],
-    expectedIndexes: IndexEntry[] = []
+    expectedIndexes: IndexEntry[] = [],
+    unclaimedIdentities: HistoryIdentity[] = []
   ) {
     return this.history.commitContentBatch(writes, {
       indexPuts: receipts,
+      receiptChecks: receipts.map(({ table, key, value }) => ({ table, key, value })),
       expectedEventCursor: cursor,
       expectedIndexes: [
         ...receipts.map(({ table, key }) => ({ table, key, value: null })),
@@ -91,6 +103,7 @@ export class RoostHistoryGeneration {
       ],
       commitMetadata: roostCommitMetadata(this.observationScope, changedIds),
       derivedIndexPuts,
+      unclaimedIdentities,
     });
   }
 
@@ -115,9 +128,12 @@ export class RoostHistoryGeneration {
       updates: new Map(),
       indexes: new Map(),
       metadataThrough: after,
+      settledThrough: after,
     };
     this.writeEvidence = evidence;
     return {
+      hasCommitted: () =>
+        evidence.raw !== this.raw || evidence.updates.size > 0 || evidence.indexes.size > 0,
       metadataCovered: (through: bigint) =>
         evidence.raw === this.raw && evidence.metadataThrough === through,
       verify: async (through: bigint): Promise<boolean> => {
@@ -160,11 +176,21 @@ export class RoostHistoryGeneration {
       before?: bigint;
       through?: bigint;
       metadataAttached?: boolean;
+      derivedIndexesApplied?: boolean;
     },
     options: Parameters<RoostNodeStream['writeBatch']>[1]
   ) {
     const evidence = this.writeEvidence;
     if (!evidence || evidence.raw !== raw) return;
+    if (
+      result.metadataAttached &&
+      result.derivedIndexesApplied &&
+      result.before === evidence.settledThrough
+    ) {
+      evidence.settledThrough = result.through;
+    } else if (result.before !== result.through || result.updates.length) {
+      evidence.settledThrough = undefined;
+    }
     if (result.metadataAttached && result.before === evidence.metadataThrough) {
       evidence.metadataThrough = result.through;
     } else if (result.before !== result.through || result.updates.length) {
@@ -181,6 +207,11 @@ export class RoostHistoryGeneration {
           addEvidence(evidence.indexes, indexKey(put.table, update.turnId));
       } else addEvidence(evidence.indexes, indexKey(put.table, put.key));
     }
+  }
+
+  /** Only the current command's exact, fully indexed local commit interval. */
+  settledWriteCursor(): bigint | undefined {
+    return this.writeEvidence?.raw === this.raw ? this.writeEvidence.settledThrough : undefined;
   }
 
   private bind(raw: RoostNodeStream): NodeLodyHistory {
@@ -202,11 +233,21 @@ export class RoostHistoryGeneration {
         activation?.cursor ??
         options?.expectedEventCursor ??
         (await unguarded.observedEventCursor());
-      await checkCurrent();
-      // The cursor was observed BEFORE checking the pointer, so activation racing
-      // this write invalidates the entire native transaction, including receipts.
+      await this.assertReceiptFormat(raw);
+      if (retired) throw stale();
+      // Compare the bound generation in the SAME transaction as content and
+      // receipts. This also catches pointer changes that emit no history event.
+      const expectedIndexes = [
+        ...(options?.expectedIndexes ?? []),
+        { ...nextKey, value: null },
+        { ...epochKey, value: boundEpoch },
+      ];
       if (!activation) {
-        const result = await raw.writeBatch(writes, { ...options, expectedEventCursor: cursor });
+        const result = await raw.writeBatch(writes, {
+          ...options,
+          expectedEventCursor: cursor,
+          expectedIndexes,
+        });
         this.recordWrite(raw, result, options);
         return result;
       }
@@ -232,6 +273,7 @@ export class RoostHistoryGeneration {
         {
           ...options,
           expectedEventCursor: cursor,
+          expectedIndexes,
           indexPuts,
         }
       );
@@ -253,7 +295,10 @@ export class RoostHistoryGeneration {
             const committed = await raw.compareAndWriteIndex(...args);
             const evidence = generation.writeEvidence;
             if (committed && evidence?.raw === raw) {
-              if (args[2]?.eventKeys?.length) evidence.metadataThrough = undefined;
+              if (args[2]?.eventKeys?.length) {
+                evidence.metadataThrough = undefined;
+                evidence.settledThrough = undefined;
+              }
               for (const key of args[2]?.eventKeys ?? [])
                 addEvidence(evidence.indexes, indexKey(key.table, key.key));
             }
@@ -456,9 +501,13 @@ export class RoostHistoryGeneration {
     } = {}
   ): Promise<void> {
     const previous = this.raw;
-    await this.assertReceiptFormat(previous);
     const previousId = this.streamId;
-    const cursor = expectedCursor ?? (await this.history.observedEventCursor());
+    const previousEpoch = this.epoch?.slice() ?? null;
+    const previousHistory = this.history;
+    await this.assertReceiptFormat(previous);
+    const cursor = expectedCursor ?? (await previousHistory.observedEventCursor());
+    const [previousHeadRaw] = await previous.readIndex([ROOST_HEAD_KEY]);
+    const previousRevision = previousHeadRaw ? decodeRoostHead(previousHeadRaw).historyRevision : 0;
     if ((await previous.readIndex([nextKey]))[0] !== null) throw stale();
     const nextId = `${this.root}:generation:${randomUUID()}`;
     const staged = new NodeLodyHistory(this.client.stream(nextId), this.owner);
@@ -494,6 +543,20 @@ export class RoostHistoryGeneration {
       await staged.commitHistoryBatch(`stage:${operationId}`, [...options.commands], {
         recovery: 'local',
       });
+    const stagedCursor = await staged.observedEventCursor();
+    const stagedHead = encodeRoostHead({
+      version: 1,
+      scope: createHash('sha256').update(this.owner).update(nextId).digest('hex'),
+      cursor: stagedCursor.toString(),
+      historyRevision: previousRevision + 1,
+      historyCount: next.length,
+      change: { kind: 'structure', from: 0, to: next.length },
+    });
+    await staged.stream.writeBatch([], {
+      expectedEventCursor: stagedCursor,
+      expectedIndexes: [{ ...ROOST_HEAD_KEY, value: null }],
+      indexPuts: [{ ...ROOST_HEAD_KEY, value: stagedHead }],
+    });
     const key = new TextEncoder().encode(
       `generation:${createHash('sha256').update(nextId).digest('hex')}`
     );
@@ -520,6 +583,11 @@ export class RoostHistoryGeneration {
       ],
       {
         expectedEventCursor: cursor,
+        expectedIndexes: [
+          { ...ROOST_HEAD_KEY, value: previousHeadRaw ?? null },
+          { ...nextKey, value: null },
+          { ...epochKey, value: previousEpoch },
+        ],
         indexPuts: [{ ...nextKey, value: new Uint8Array(), onceKey: key, emitEvent: true }],
       }
     );

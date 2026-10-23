@@ -7,6 +7,15 @@ does not require rediscovering them. Runtime contracts remain in
 Run expensive measurements manually; timing is never a CI assertion.
 
 For the current coordinated release, use the [PR stack integration review](../notes/proposed/testing/2026-10-22-roost-pr-stack-integration.md) for exact heads, dependency order and release gates.
+The [append CPU report](../notes/proposed/architecture/2026-10-23-roost-append-cpu-structure.md#completed-local-optimization-acceptance--2026-10-23)
+records request reduction, paired resource results and retained read-time outliers.
+The [Native publication report](../notes/proposed/architecture/2026-10-23-roost-native-publication-boundary.md#final-local-resource-measurements)
+records the coordinated command/head/observer unit, complete resource tables and
+retained RSS-limit failures. These local results do not imply release acceptance.
+The [control storage study](../notes/proposed/architecture/2026-10-23-roost-control-storage.md)
+records the minimal notification change and rejected storage experiments. Ordinary
+Roost KV values already have independent compression; check the current source
+and retained-byte/page breakdown before proposing the same optimization again.
 
 ## Prepare once per source revision
 
@@ -68,6 +77,11 @@ If needed, scope it to one Native test/benchmark command. A local source link
 does not make published dependency CI green; release and pin the matching SDK
 before removing that release blocker.
 
+For a Native storage change, the owning integration command is
+`node --test tests/native.test.mjs` from `node/native` after building the addon.
+The package-wide `pnpm test` additionally runs release-script fixtures; those
+are a separate boundary and must not replace the Native storage suite.
+
 ## Select checks from the changed boundary
 
 During iteration, run the owning row below. After a fix, rerun its failed case and
@@ -76,15 +90,16 @@ root `corepack pnpm check` and `corepack pnpm format` once before committing, th
 `corepack pnpm run docs check`. Subsequent documentation-only edits need docs and
 format checks, not another complete runtime run.
 
-| Change                                                  | Owning checks                                                                                                                                                 | Additional evidence when relevant                                                                                            |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| Text notification semantics / immutable plans           | CLI `acp-apply-notification-on-history.test.ts`                                                                                                               | Split Unicode, prompt markers, thinking/plan tags, snapshot/overlap behavior, malformed stored scalars, caller mutation      |
-| History actions / state projection                      | Shared `session-history-actions.test.ts`; CLI `roost-message-state.test.ts`                                                                                   | Finish/permission semantics, borrowed snapshot ownership, bounded resumed-state programs, Native scalar offsets and own keys |
-| Lody commit, projection, receipt or branch behavior     | CLI `roost-session-backend-contract.test.ts`, `roost-history-local-writes.test.ts`, `roost-history-local-branch.test.ts`, `roost-history-local-owner.test.ts` | Retry/lost reply, foreign/pending events, reopen, reader ownership, pagination and retained overlays                         |
-| SDK history/checkpoint/index behavior                   | Roost `ts` type/build; Native `tests/native.test.mjs`; SDK `lody-history.test.mjs` and `node-history-index.test.mjs`                                          | Browser IndexedDB and Native/process paths; copied/altered proof, stale CAS, non-applied derived group                       |
-| Rust storage, events, transaction or signature behavior | Matching Roost Rust integration suites, fmt and clippy; Native integration                                                                                    | Crash/reopen, export identity, partial replica, seal/owner/sequence rules; rebuild addon                                     |
-| Packed consumer or release layout                       | Existing Roost consumer/release checks and platform CI                                                                                                        | Installed tarball, optional platform package and supported Node floor                                                        |
-| Performance-sensitive path                              | Owning correctness suites, then one applicable manual benchmark below                                                                                         | Same host, workload, durability, read-consumer behavior and source hashes                                                    |
+| Change                                                  | Owning checks                                                                                                                                                                                                          | Additional evidence when relevant                                                                                            |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Text notification semantics / immutable plans           | CLI `acp-apply-notification-on-history.test.ts`                                                                                                                                                                        | Split Unicode, prompt markers, thinking/plan tags, snapshot/overlap behavior, malformed stored scalars, caller mutation      |
+| History actions / state projection                      | Shared `session-history-actions.test.ts`; CLI `roost-message-state.test.ts`                                                                                                                                            | Finish/permission semantics, borrowed snapshot ownership, bounded resumed-state programs, Native scalar offsets and own keys |
+| Lody commit, projection, receipt or branch behavior     | CLI `roost-session-backend-contract.test.ts`, `roost-history-local-writes.test.ts`, `roost-history-local-branch.test.ts`, `roost-history-local-owner.test.ts`                                                          | Retry/lost reply, foreign/pending events, reopen, reader ownership, pagination and retained overlays                         |
+| SDK history/checkpoint/index behavior                   | Roost `ts` type/build; Native `tests/native.test.mjs`; SDK `lody-history.test.mjs` and `node-history-index.test.mjs`                                                                                                   | Browser IndexedDB and Native/process paths; copied/altered proof, stale CAS, non-applied derived group                       |
+| Rust storage, events, transaction or signature behavior | Matching Roost Rust integration suites, fmt and clippy; Native integration                                                                                                                                             | Crash/reopen, export identity, partial replica, seal/owner/sequence rules; rebuild addon                                     |
+| Packed consumer or release layout                       | Existing Roost consumer/release checks and platform CI                                                                                                                                                                 | Installed tarball, optional platform package and supported Node floor                                                        |
+| History RPC / protocol / observation / cache            | Shared `machine-protocol-capabilities.test.ts`; CLI `message-handler-machine-registration.test.ts`, `roost-session-backend.test.ts`; components `conversation-session-backend-factory.test.ts` (including cache cases) | Advertised capability version, coherent checkpoints, bootstrap/close, reconnect and offline cache                            |
+| Performance-sensitive path                              | Owning correctness suites, then one applicable manual benchmark below                                                                                                                                                  | Same host, workload, durability, read-consumer behavior and source hashes                                                    |
 
 Run the CLI suites from `apps/cli`:
 
@@ -92,6 +107,10 @@ Run the CLI suites from `apps/cli`:
 corepack pnpm exec vitest run tests/acp-apply-notification-on-history.test.ts
 corepack pnpm exec vitest run tests/roost-session-backend-contract.test.ts tests/roost-history-local-writes.test.ts tests/roost-history-local-branch.test.ts tests/roost-history-local-owner.test.ts --maxWorkers=2
 ```
+
+Use the package's `corepack pnpm typecheck` for static validation. The CLI selects
+`tsgo --noEmit -p tsconfig.typecheck.json`; a raw `tsc -p tsconfig.json` also includes
+test/renderer declarations outside that configured check and is not its substitute.
 
 Run SDK history suites from Roost's `ts` after building. On a constrained host,
 serialize browser files; the existing test-name filter selects the browser:
@@ -112,6 +131,14 @@ SDK built. For the complete Native/sync/release-unit suite, use `npm test`: the
 publisher fixtures require npm's executable path and do not accept a direct
 `node --test tests/release.test.mjs` invocation. It requires the addon; subprocess-only tests use the matching owner
 binary. Follow that checkout's Native README/CI for Rust and package checks.
+
+Desktop staging fixtures resolve the host platform package from the Native wrapper's
+real path. Use an installed package or a staged copy of the matching local runtime
+with its exact-version platform dependency pins and host package/addon. The main
+wrapper carries no adjacent `.node` in the split layout. A bare source-checkout symlink can
+lack that package and makes recursive fixture copies include the Rust target tree.
+Record staged runtime/addon hashes, retain setup failures, and restore dependency
+links afterwards. A local candidate does not prove published npm dependency compatibility.
 
 ## Choose a fixed manual benchmark
 
@@ -162,13 +189,37 @@ The **mixed/resumed** case sets `LONG_BENCH_MIXED=1`, `ROUNDS=10`, `CHUNKS=100`,
 `CHUNK_BYTES=1024`, `TOOL_BYTES=16384`. It includes a fragmented thinking block,
 Unicode, tool/plan changes, and a durable finish/reopen halfway through each reply.
 The `resume` metric includes that finish/open pair and both persistence barriers;
-chunk latency includes later writes to the resumed state. Its expected business
+chunk latency includes later writes to the resumed state. Role-specific creation,
+first resumed-append and notification-category statistics are separate. A combined
+text/tool/plan batch does not isolate individual tool or plan cost. Memory milestones
+record the state before diagnostic page reads; WAL/SHM bytes remain separate from
+logical DB pages. Its expected business
 content comes from the established mutating reducer, and includes the final plan.
 Use identical deterministic fixtures; do not include fixture generation, builds
 or other tests in the timed interval. Run baseline/candidate in an A–B–B–A order
 when reporting a speed change. Record the shared reducer revision used by Loro.
 Larger cases are opt-in and must state their parameters rather than silently
 replacing the standard workloads.
+
+The joint-stack comparison uses these fixed durable workloads, each followed by
+fresh-process reopen and paging:
+
+| Case                              | ROUNDS | CHUNKS | CHUNK_BYTES | TOOL_BYTES | MIXED |
+| --------------------------------- | ------ | ------ | ----------- | ---------- | ----- |
+| Short                             | 1      | 224    | 256         | 16384      | 0     |
+| Streamed history (1,000 messages) | 500    | 20     | 256         | 16384      | 0     |
+| Single 1 MiB reply                | 1      | 1024   | 1024        | 16384      | 0     |
+| Mixed/resumed                     | 10     | 100    | 1024        | 16384      | 1     |
+
+With a Loro reference, use baseline-1 → candidate-1 → Loro-1 → Loro-2 →
+candidate-2 → baseline-2. Keep a stage ledger so interrupted runs resume only
+missing stages. Retry failed measurements at most once after diagnosis, from a
+fresh copy of the closed seed, preserving both logs and the original failure.
+Do not raise resource budgets to make a failed group pass. Summarize only trials
+whose owning mutation/content checks and fresh-process verification completed;
+partial JSON is diagnostic evidence, not a successful sample. Report the actual
+number of complete trials and any missing phases. Compare matching source and
+harness hashes before resuming instead of restarting successful unrelated cases.
 
 After the three stages for both backends, verify the persisted results:
 
@@ -212,9 +263,10 @@ LONG_BENCH_DISPATCH=1 LONG_BENCH_DIR="$BENCH_DIR/roost-1000" \
 
 Close preparation completely. Copy its database directory into a new trial
 directory, then run `measure` followed by `verify`, each in a fresh process with
-the same environment except `LONG_BENCH_DIR` and `LONG_BENCH_STAGE`. Use the same
-prepared Roost seed for baseline/candidate A–B–B–A trials and a Loro seed with
-identical business content. Record the exact overlaid sources and dependency
+the same environment except `LONG_BENCH_DIR` and `LONG_BENCH_STAGE`. Reuse a closed Roost seed across baseline/candidate A–B–B–A trials only when
+their container and application formats match. Otherwise prepare each runtime
+from the identical declared input sequence and record its container version;
+use the matching Loro business content. Record the exact overlaid sources and dependency
 paths, and restore any archived research workspace in `finally`.
 
 The measurement invokes the real watcher's history/queue selection 13 times
@@ -250,6 +302,10 @@ Agent Note, linked from the PR and this guide. Raw JSON alone is insufficient.
 Use the same rows for baseline, candidate and Loro; show regressions and missing
 measurements alongside improvements. A narrow probe may mark unrelated rows
 `not measured`, but cannot establish overall or long-conversation performance.
+The user-facing chat summary includes the main latency, CPU, RSS/growth and storage
+tables directly. A linked report supplements those numbers; it must not be the
+only place showing memory or regressions. Label prior-run references separately
+from contemporaneous paired measurements.
 The [completed incremental-mutation report](../notes/proposed/architecture/2026-10-22-roost-end-to-end-incremental-mutations.md#complete-resource-report)
 is the current example, including its measurement gaps and read-path interpretation.
 
@@ -328,6 +384,32 @@ declaring the performance objective complete.
   if an archived workspace was used. Prefer isolated clones so swapping source
   files is unnecessary. A successful benchmark never authorizes deployment.
 
+Reserve seed-copy bytes above the minimum free-space budget before cloning a
+large prepared prefix. A refusal before stage start is a coordinator limit;
+retain it separately from product test failures. Reclaim only owned synthetic
+copies through byte-verified recoverable archives, without relaxing the budget.
+
 Update this guide and its owning benchmark when a repeatable setup issue is found.
 Keep per-change conclusions in the owning Agent Note rather than creating a new
 test recipe for every PR.
+
+## Storage refactor acceptance
+
+When changing private body/log/projection representation, keep the fixed current
+candidate and published reference untouched. Use a separate matching Native
+consumer, record every Rust/build-input hash and loaded addon hash, and scope any
+dependency-link replacement to the isolated measurement checkout. Restore that
+link after checks. Do not use a global NAPI override for a Vitest/Rolldown process.
+
+In addition to the standard workloads, reconcile decoded body/log/projection
+bytes with actual SQLite pages, indexes and control DB allocation. Demonstrate
+byte-exact retained exports, bounded range/tail I/O, invalid edits without partial
+mutation, rollback fault sweeps, seals, pending replay and reopen. A storage cut
+does not establish a process RSS cut. Include RSS/growth and CPU in chat tables.
+
+Keep cold first append separate from steady appends and prepared-index selection.
+If a small tail difference repeats, report individual samples; do not discard it
+inside a faster average. The shared-body follow-up in the linked integration
+review records the user's accepted approximately 3.3 ms first-cold-append difference.
+Retain failed full-suite logs and compare unchanged baseline behavior before
+attributing an intermittent transport fixture error to the storage refactor.

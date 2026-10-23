@@ -88,6 +88,7 @@ import {
 import { findNextDispatchableUserTurn } from '../src/session/session-dispatch-logic';
 import type { SessionMeta } from '@lody/shared';
 import { encodeRoostContent } from '../src/session/roost-history-port';
+import { RoostHistoryHead, ROOST_HEAD_KEY } from '../src/session/roost-history-head';
 import { loadRoostOwnerSeedLegacy } from '../src/session/roost-writer-identity';
 import type { SessionBackendContractFixtureFactory } from './session-backend-contract';
 import { defineSessionBackendContract } from './session-backend-contract';
@@ -865,8 +866,22 @@ describe('Production Roost history semantics', () => {
       await fixture.backend.appendHistoryTurn(nativeUser('rpc-retained-user'));
       const workerFailure = new RoostHostError('workerFailed');
       workerFailure.cause = new Error('synthetic private Worker path');
-      const request = vi.spyOn(RoostNativeClient.prototype, 'request');
-      request.mockRejectedValueOnce(workerFailure);
+      const nativeRequest = RoostNativeClient.prototype.request;
+      let rejected = false;
+      const request = vi
+        .spyOn(RoostNativeClient.prototype, 'request')
+        .mockImplementation(function (dto, options) {
+          const target =
+            kind === 'write'
+              ? dto.method === 'writeBatch' && dto.writes?.length
+              : dto.method === 'indexRead' &&
+                dto.keys?.some((key) => key.table === ROOST_HEAD_KEY.table);
+          if (!rejected && dto.stream === `lody-session:${fixture.doc.sessionId}` && target) {
+            rejected = true;
+            return Promise.reject(workerFailure);
+          }
+          return nativeRequest.call(this, dto, options);
+        });
       const noop = () => undefined;
       const handler = new MessageHandler(
         {
@@ -934,8 +949,22 @@ describe('Production Roost history semantics', () => {
     await fixture.backend.appendHistoryTurn(nativeUser('retained-user'));
     const workerFailure = new RoostHostError('workerFailed');
     workerFailure.cause = new Error('synthetic private loader detail');
-    const request = vi.spyOn(RoostNativeClient.prototype, 'request');
-    request.mockRejectedValueOnce(workerFailure);
+    const nativeRequest = RoostNativeClient.prototype.request;
+    let rejected = false;
+    const request = vi
+      .spyOn(RoostNativeClient.prototype, 'request')
+      .mockImplementation(function (dto, options) {
+        if (
+          !rejected &&
+          dto.stream === `lody-session:${fixture.doc.sessionId}` &&
+          dto.method === 'writeBatch' &&
+          dto.writes?.length
+        ) {
+          rejected = true;
+          return Promise.reject(workerFailure);
+        }
+        return nativeRequest.call(this, dto, options);
+      });
     const failure = await fixture.backend
       .appendHistoryTurn(nativeUser('failed-user'))
       .catch((error: unknown) => error);
@@ -1288,7 +1317,12 @@ describe('Production Roost history semantics', () => {
       ...nativeAssistant(turnId),
       acpTurnId: 'atomic-goal-boundary',
       items: [
-        { type: 'goal', threadId: 'atomic-goal', objective: 'Preserve this goal', status: 'active' },
+        {
+          type: 'goal',
+          threadId: 'atomic-goal',
+          objective: 'Preserve this goal',
+          status: 'active',
+        },
         { type: 'text', text: 'start' },
       ],
     });
@@ -1299,35 +1333,35 @@ describe('Production Roost history semantics', () => {
     };
     const original = RoostNativeClient.prototype.request;
     let committed = false;
-    const lost = vi.spyOn(RoostNativeClient.prototype, 'request').mockImplementation(async function (
-      ...args
-    ) {
-      const result = await original.apply(this, args);
-      const command = args[0];
-      if (!committed && command.method === 'writeBatch' && command.derivedIndexes) {
-        const commit = result as Awaited<
-          ReturnType<import('@loro-dev/roost-node').RoostNodeStream['writeBatch']>
-        >;
-        expect(commit.derivedIndexesApplied).toBe(true);
-        const host = this.stream(command.stream);
-        expect(await readGoalProjection(host, commit.through, 2)).toMatchObject({
-          turnId,
-          position: 1,
-          goal: { threadId: 'atomic-goal', status: 'active' },
-        });
-        const receipts = command.indexPuts.map((put) => ({
-          table: put.table,
-          key: Buffer.from(put.keyHex, 'hex'),
-        }));
-        expect((await host.readIndex(receipts)).map((value) => value && [...value])).toEqual(
-          command.indexPuts.map((put) => [...Buffer.from(put.valueHex, 'hex')])
-        );
-        committed = true;
-        // Lose the real Native reply before the SDK adopts its checkpoint.
-        throw new RoostHostError('unknownOutcome');
-      }
-      return result;
-    });
+    const lost = vi
+      .spyOn(RoostNativeClient.prototype, 'request')
+      .mockImplementation(async function (...args) {
+        const result = await original.apply(this, args);
+        const command = args[0];
+        if (!committed && command.method === 'writeBatch' && command.derivedIndexes) {
+          const commit = result as Awaited<
+            ReturnType<import('@loro-dev/roost-node').RoostNodeStream['writeBatch']>
+          >;
+          expect(commit.derivedIndexesApplied).toBe(true);
+          const host = this.stream(command.stream);
+          expect(await readGoalProjection(host, commit.through, 2)).toMatchObject({
+            turnId,
+            position: 1,
+            goal: { threadId: 'atomic-goal', status: 'active' },
+          });
+          const receipts = command.indexPuts.map((put) => ({
+            table: put.table,
+            key: Buffer.from(put.keyHex, 'hex'),
+          }));
+          expect((await host.readIndex(receipts)).map((value) => value && [...value])).toEqual(
+            command.indexPuts.map((put) => [...Buffer.from(put.valueHex, 'hex')])
+          );
+          committed = true;
+          // Lose the real Native reply before the SDK adopts its checkpoint.
+          throw new RoostHostError('unknownOutcome');
+        }
+        return result;
+      });
     try {
       await expect(fixture.backend.applyAgentBatch(input)).rejects.toMatchObject({
         code: 'unknownOutcome',
@@ -1397,15 +1431,15 @@ describe('Production Roost history semantics', () => {
     const id = fixture.doc.sessionId;
     const finish = NodeLodyHistory.prototype.finish;
     let restoreWindow: (() => void) | undefined;
-    const seal = vi.spyOn(NodeLodyHistory.prototype, 'finish').mockImplementationOnce(async function (
-      ...args
-    ) {
-      await finish.apply(this, args);
-      const blocked = vi
-        .spyOn(NodeLodyHistory.prototype, 'readActiveBranchPage')
-        .mockRejectedValue(new Error('Synthetic window reread unavailable'));
-      restoreWindow = () => blocked.mockRestore();
-    });
+    const seal = vi
+      .spyOn(NodeLodyHistory.prototype, 'finish')
+      .mockImplementationOnce(async function (...args) {
+        await finish.apply(this, args);
+        const blocked = vi
+          .spyOn(NodeLodyHistory.prototype, 'readActiveBranchPage')
+          .mockRejectedValue(new Error('Synthetic window reread unavailable'));
+        restoreWindow = () => blocked.mockRestore();
+      });
     try {
       await fixture.backend.appendHistoryTurn({
         ...nativeAssistant('single-seal'),
@@ -1432,12 +1466,12 @@ describe('Production Roost history semantics', () => {
     const fixture = await nativeFixture();
     const peer = await nativeFixture(fixture.doc.sessionId);
     const finish = NodeLodyHistory.prototype.finish;
-    const seal = vi.spyOn(NodeLodyHistory.prototype, 'finish').mockImplementationOnce(async function (
-      ...args
-    ) {
-      await finish.apply(this, args);
-      await peer.backend.appendHistoryTurn(nativeUser('foreign-after-seal'));
-    });
+    const seal = vi
+      .spyOn(NodeLodyHistory.prototype, 'finish')
+      .mockImplementationOnce(async function (...args) {
+        await finish.apply(this, args);
+        await peer.backend.appendHistoryTurn(nativeUser('foreign-after-seal'));
+      });
     try {
       await fixture.backend.appendHistoryTurn({
         ...nativeAssistant('local-seal'),
@@ -1507,7 +1541,8 @@ describe('Production Roost history semantics', () => {
         );
         expect(response.success).toBe(true);
         const changes = SessionHistoryChangesSchema.parse(response.result);
-        if (changes.state !== 'ready' || !changes.patches) throw new Error('Expected native patches');
+        if (changes.state !== 'ready' || !changes.patches)
+          throw new Error('Expected native patches');
         expect(changes.patches.baseCheckpoint).toBe(checkpoint);
         expect(changes.patches.turns.map((row) => row.turnId)).toEqual([turn.id]);
         expect(changes.bodies).toEqual({ changed: [], suffix: [] });
@@ -1701,58 +1736,91 @@ describe('Production Roost history semantics', () => {
 
   it('reads legacy whole-message states across reopen and converts only the next mutation', async () => {
     let fixture = await nativeFixture();
-    const turn = { ...nativeAssistant('legacy-state'), finished: true,
-      items: [{ type: 'text' as const, text: 'sealed body' }] };
+    const turn = {
+      ...nativeAssistant('legacy-state'),
+      finished: true,
+      items: [{ type: 'text' as const, text: 'sealed body' }],
+    };
     await fixture.backend.appendHistoryTurn(turn);
     const legacy = { ...turn, items: [{ type: 'text' as const, text: 'legacy correction' }] };
     const batch = NodeLodyHistory.prototype.commitHistoryBatch;
-    const previous = vi.spyOn(NodeLodyHistory.prototype, 'commitHistoryBatch').mockImplementation(async function (batchId, commands, options) {
-      return batch.call(this, batchId, commands.map(command =>
-        command.type === 'accept' && command.identity.segmentId.startsWith('state:')
-          ? { ...command, content: encodeRoostContent(legacy) } : command
-      ), options);
-    });
+    const previous = vi
+      .spyOn(NodeLodyHistory.prototype, 'commitHistoryBatch')
+      .mockImplementation(async function (batchId, commands, options) {
+        return batch.call(
+          this,
+          batchId,
+          commands.map((command) =>
+            command.type === 'accept' && command.identity.segmentId.startsWith('state:')
+              ? { ...command, content: encodeRoostContent(legacy) }
+              : command
+          ),
+          options
+        );
+      });
     try {
-      await fixture.backend.applyHistoryAction({ kind: 'assistant-items', turnId: turn.id,
-        mode: 'replace', items: legacy.items });
-    } finally { previous.mockRestore(); }
+      await fixture.backend.applyHistoryAction({
+        kind: 'assistant-items',
+        turnId: turn.id,
+        mode: 'replace',
+        items: legacy.items,
+      });
+    } finally {
+      previous.mockRestore();
+    }
     const sessionId = fixture.doc.sessionId;
     await fixture.close();
     fixture = await nativeFixture(sessionId);
     expect(await fixture.backend.readTurn(turn.id)).toMatchObject({ state: 'ready', turn: legacy });
     const items = [{ type: 'text' as const, text: 'next correction 🙂' }];
-    await fixture.backend.applyHistoryAction({ kind: 'assistant-items', turnId: turn.id,
-      mode: 'replace', items });
+    await fixture.backend.applyHistoryAction({
+      kind: 'assistant-items',
+      turnId: turn.id,
+      mode: 'replace',
+      items,
+    });
     await fixture.close();
     fixture = await nativeFixture(sessionId);
     expect(await fixture.backend.readTurn(turn.id)).toMatchObject({
-      state: 'ready', turn: { ...legacy, items },
+      state: 'ready',
+      turn: { ...legacy, items },
     });
   });
 
   it('keeps post-seal state updates bounded and recovers a lost first-state reply', async () => {
     const fixture = await nativeFixture();
     const untouched = 'sealed synthetic tool body '.repeat(16384);
-    const tool = { type: 'tool_call' as const, toolCallId: 'large-tool', status: 'completed' as const,
-      title: 'Synthetic tool', rawOutput: { text: untouched } };
+    const tool = {
+      type: 'tool_call' as const,
+      toolCallId: 'large-tool',
+      status: 'completed' as const,
+      title: 'Synthetic tool',
+      rawOutput: { text: untouched },
+    };
     const turn = {
       ...nativeAssistant('sealed-state-budget'),
-      items: [
-        tool,
-        { type: 'text' as const, text: 'base🙂' },
-      ],
+      items: [tool, { type: 'text' as const, text: 'base🙂' }],
     };
     let primaryId: Uint8Array | undefined;
     const accept = NodeLodyHistory.prototype.acceptToView;
-    const capture = vi.spyOn(NodeLodyHistory.prototype, 'acceptToView').mockImplementation(async function (...args) {
-      const result = await accept.apply(this, args);
-      if (args[0].input.businessId === turn.id) primaryId = result.turnId.slice();
-      return result;
-    });
-    try { await fixture.backend.appendHistoryTurn(turn); }
-    finally { capture.mockRestore(); }
+    const capture = vi
+      .spyOn(NodeLodyHistory.prototype, 'acceptToView')
+      .mockImplementation(async function (...args) {
+        const result = await accept.apply(this, args);
+        if (args[0].input.businessId === turn.id) primaryId = result.turnId.slice();
+        return result;
+      });
+    try {
+      await fixture.backend.appendHistoryTurn(turn);
+    } finally {
+      capture.mockRestore();
+    }
     if (!primaryId) throw new Error('Expected primary');
-    await fixture.backend.applyHistoryAction({ kind: 'finish-assistant', turnId: turn.id, endedAt: 42 });
+    await fixture.backend.applyHistoryAction({
+      kind: 'finish-assistant',
+      turnId: turn.id,
+      endedAt: 42,
+    });
     const updates = async () => {
       const dbPath = join(nativeDirectory, 'history.db');
       const seed = await loadRoostOwnerSeedLegacy(dbPath);
@@ -1785,23 +1853,41 @@ describe('Production Roost history semantics', () => {
         await reader.close();
       }
     };
-    const before = new Map((await updates()).map(row => [row.key.toString('hex'), row.value]));
+    const before = new Map((await updates()).map((row) => [row.key.toString('hex'), row.value]));
     expect(before.size).toBeGreaterThan(0);
     let items = turn.items;
     const batch = NodeLodyHistory.prototype.commitHistoryBatch;
-    const lost = vi.spyOn(NodeLodyHistory.prototype, 'commitHistoryBatch').mockImplementationOnce(async function (...args) {
-      await batch.apply(this, args);
-      throw new Error('Lost first-state reply');
-    });
+    const lost = vi
+      .spyOn(NodeLodyHistory.prototype, 'commitHistoryBatch')
+      .mockImplementationOnce(async function (...args) {
+        await batch.apply(this, args);
+        throw new Error('Lost first-state reply');
+      });
     items = [tool, { type: 'text', text: 'base🙂🚀' }];
     try {
-      await expect(fixture.backend.applyHistoryAction({ kind: 'assistant-items', turnId: turn.id,
-        mode: 'replace', items })).rejects.toThrow('Lost first-state reply');
-    } finally { lost.mockRestore(); }
-    expect(await fixture.backend.readTurn(turn.id)).toMatchObject({ state: 'ready', turn: { items } });
+      await expect(
+        fixture.backend.applyHistoryAction({
+          kind: 'assistant-items',
+          turnId: turn.id,
+          mode: 'replace',
+          items,
+        })
+      ).rejects.toThrow('Lost first-state reply');
+    } finally {
+      lost.mockRestore();
+    }
+    expect(await fixture.backend.readTurn(turn.id)).toMatchObject({
+      state: 'ready',
+      turn: { items },
+    });
     for (let step = 1; step < 32; step++) {
       items = [tool, { type: 'text', text: `base🙂${'🚀'.repeat(step + 1)}` }];
-      await fixture.backend.applyHistoryAction({ kind: 'assistant-items', turnId: turn.id, mode: 'replace', items });
+      await fixture.backend.applyHistoryAction({
+        kind: 'assistant-items',
+        turnId: turn.id,
+        mode: 'replace',
+        items,
+      });
     }
     await fixture.backend.flushLocalWrites();
     const after = await updates();
@@ -1809,8 +1895,8 @@ describe('Production Roost history semantics', () => {
       const old = before.get(row.key.toString('hex'));
       if (old) expect(row.value.equals(old)).toBe(true);
     }
-    expect(after.filter(row => before.has(row.key.toString('hex'))).length).toBe(before.size);
-    const added = after.filter(row => !before.has(row.key.toString('hex')));
+    expect(after.filter((row) => before.has(row.key.toString('hex'))).length).toBe(before.size);
+    const added = after.filter((row) => !before.has(row.key.toString('hex')));
     expect(added.length).toBeGreaterThan(0);
     expect(added.reduce((sum, row) => sum + row.value.length, 0)).toBeLessThan(128 * 1024);
     for (const row of added) {
@@ -1821,7 +1907,8 @@ describe('Production Roost history semantics', () => {
     await fixture.close();
     const reopened = await nativeFixture(sessionId);
     expect(await reopened.backend.readTurn(turn.id)).toMatchObject({
-      state: 'ready', turn: { items, finished: true, endedAt: 42 },
+      state: 'ready',
+      turn: { items, finished: true, endedAt: 42 },
     });
     expect((await reopened.backend.readHistory()).length).toBe(1);
   });
@@ -2045,21 +2132,158 @@ describe('Production Roost history semantics', () => {
     ]);
   });
 
-  it('republishes a committed history correction after its control cursor write fails', async () => {
+  it.each([1, 3])(
+    'never replays an applied append after %i publication CAS failures',
+    async (failures) => {
+      const fixture = await nativeFixture();
+      await fixture.backend.appendHistoryTurn({
+        ...nativeAssistant('publish-once'),
+        finished: true,
+        items: [{ type: 'text', text: 'base' }],
+      });
+      const publish = RoostHistoryHead.prototype.publish;
+      let remaining = failures;
+      const spy = vi.spyOn(RoostHistoryHead.prototype, 'publish').mockImplementation(function (
+        ...args
+      ) {
+        if (remaining-- > 0)
+          return Promise.reject(
+            Object.assign(new Error('Synthetic publication race'), { code: 'stale' })
+          );
+        return publish.apply(this, args);
+      });
+      try {
+        const append = fixture.backend.applyHistoryAction({
+          kind: 'assistant-items',
+          turnId: 'publish-once',
+          mode: 'append',
+          items: [{ type: 'text', text: 'once' }],
+        });
+        if (failures === 1) await append;
+        else await expect(append).rejects.toMatchObject({ code: 'publication_stale' });
+      } finally {
+        spy.mockRestore();
+      }
+      const read = await fixture.backend.readTurn('publish-once');
+      if (read.state !== 'ready') throw new Error('Committed body unavailable');
+      expect(
+        read.turn.items
+          .filter((item) => item.type === 'text')
+          .map((item) => item.text)
+          .join('')
+      ).toBe('baseonce');
+      expect(await fixture.backend.history.getPublication!()).toMatchObject({ historyCount: 1 });
+    }
+  );
+
+  it('invalidates an older loaded page after another owner changes it without reading that page again', async () => {
+    const id = `outside-window-${ordinal++}`;
+    const root = `lody-session:${id}`;
+    const hint = Promise.withResolvers<void>();
+    let after: bigint | undefined;
+    let native!: RoostNativeClient;
+    let tapped = false;
+    const onChanges = RoostNativeClient.prototype.onChanges;
+    const tap = vi
+      .spyOn(RoostNativeClient.prototype, 'onChanges')
+      .mockImplementation(function (stream, listener, options) {
+        if (stream !== root || tapped) return onChanges.call(this, stream, listener, options);
+        tapped = true;
+        native = this;
+        return onChanges.call(
+          this,
+          stream,
+          (cursor, indexChange) => {
+            listener(cursor, indexChange);
+            if (after !== undefined && cursor !== null && cursor > after) hint.resolve();
+          },
+          options
+        );
+      });
+    const source = await nativeFixture(id);
+    tap.mockRestore();
+    for (let i = 0; i < 45; i++) await source.backend.appendHistoryTurn(nativeUser(`outside-${i}`));
+    await source.backend.history.readRange(0, 1);
+    const changes: { kind: string; from?: number; ids?: readonly string[] }[] = [];
+    const observation = source.backend.history.observe((change) => changes.push(change));
+    await observation.initial;
+    const events = await native.stream(root).eventsAfter(0n, 1000n);
+    after = events.at(-1)?.cursor ?? 0n;
+    const peer = await nativeFixture(id);
+    try {
+      await peer.backend.applyHistoryAction({
+        kind: 'user-status',
+        turnId: 'outside-0',
+        status: 'seen',
+      });
+      await hint.promise;
+      await source.backend.flushLocalWrites();
+      expect(
+        changes.some((change) =>
+          change.kind === 'changed' ? change.ids?.includes('outside-0') : change.from === 0
+        )
+      ).toBe(true);
+      expect(await source.backend.readTurn('outside-0')).toMatchObject({
+        state: 'ready',
+        turn: { status: 'seen' },
+      });
+    } finally {
+      observation.unsubscribe();
+      await peer.close();
+      await source.close();
+    }
+  });
+
+  it('does not replay an ordinary command after a committed content reply is superseded', async () => {
+    const fixture = await nativeFixture();
+    await fixture.backend.appendHistoryTurn({
+      ...nativeAssistant('commit-once'),
+      items: [{ type: 'text', text: 'base' }],
+    });
+    const commit = RoostHistoryGeneration.prototype.commitPatches;
+    const spy = vi
+      .spyOn(RoostHistoryGeneration.prototype, 'commitPatches')
+      .mockImplementationOnce(async function (...args) {
+        await commit.apply(this, args);
+        throw Object.assign(new Error('Synthetic projection supersession'), { code: 'stale' });
+      });
+    try {
+      await expect(
+        fixture.backend.applyHistoryAction({
+          kind: 'assistant-items',
+          turnId: 'commit-once',
+          mode: 'append',
+          items: [{ type: 'text', text: 'once' }],
+        })
+      ).rejects.toMatchObject({ code: 'write_stale' });
+    } finally {
+      spy.mockRestore();
+    }
+    const read = await fixture.backend.readTurn('commit-once');
+    if (read.state !== 'ready') throw new Error('Committed body unavailable');
+    expect(
+      read.turn.items
+        .filter((item) => item.type === 'text')
+        .map((item) => item.text)
+        .join('')
+    ).toBe('baseonce');
+  });
+
+  it('republishes a committed history correction after its Native head write fails', async () => {
     const fixture = await nativeFixture();
     await fixture.backend.appendHistoryTurn(nativeUser('cursor-u'));
     await fixture.backend.appendHistoryTurn(nativeAssistant('cursor-a'));
-    const before = await fixture.doc.getRoostHistoryCursor();
+    const before = await fixture.backend.history.getPublication!();
     const spy = vi
-      .spyOn(fixture.doc, 'setRoostHistoryCursor')
-      .mockRejectedValueOnce(new Error('Injected cursor failure'));
+      .spyOn(RoostHistoryHead.prototype, 'publish')
+      .mockRejectedValueOnce(new Error('Injected head failure'));
     await expect(
       fixture.backend.applyHistoryAction({
         kind: 'user-status',
         turnId: 'cursor-u',
         status: 'seen',
       })
-    ).rejects.toThrow('Injected cursor failure');
+    ).rejects.toThrow('Injected head failure');
     spy.mockRestore();
     await fixture.backend.applyHistoryAction({
       kind: 'user-status',
@@ -2070,8 +2294,8 @@ describe('Production Roost history semantics', () => {
       state: 'ready',
       turn: { status: 'seen' },
     });
-    expect((await fixture.doc.getRoostHistoryCursor())?.historyRevision).toBeGreaterThan(
-      before!.historyRevision!
+    expect((await fixture.backend.history.getPublication!()).historyRevision).toBeGreaterThan(
+      before.historyRevision
     );
   });
 
@@ -2205,6 +2429,13 @@ describe('Production Roost history semantics', () => {
       ...nativeAssistant('concurrent-tail-a'),
       items: [{ type: 'text', text: 'start' }],
     });
+    // Prime an applied content/goal checkpoint, then race its reuse in the next
+    // command. A matching cached cursor must not hide a subsequent peer event.
+    await first.backend.applyAgentBatch({
+      targetAssistantEntryId: 'concurrent-tail-a',
+      operationIds: ['concurrent-goal-prime'],
+      contents: [{ type: 'text', text: 'warm' }],
+    });
     const peer = await nativeFixture(first.doc.sessionId);
     const original = RoostHistoryGeneration.prototype.commitPatches;
     let injected = false;
@@ -2287,7 +2518,7 @@ describe('Production Roost history semantics', () => {
       turn: { id: 'lost-replacement' },
     });
     await fixture.backend.flushLocalWrites();
-    expect(await fixture.doc.getRoostHistoryCursor()).toMatchObject({ historyCount: 1 });
+    expect(await fixture.backend.history.getPublication!()).toMatchObject({ historyCount: 1 });
     expect((await fixture.backend.readHistory()).map((entry) => entry.id)).toEqual([
       'lost-replacement',
     ]);
@@ -2603,7 +2834,7 @@ describe('Production Roost history semantics', () => {
           { position: 4, turnId: 'target-a' },
         ]);
       await target.backend.flushLocalWrites();
-      expect(await target.doc.getRoostHistoryCursor()).toMatchObject({ historyCount: 5 });
+      expect(await target.backend.history.getPublication!()).toMatchObject({ historyCount: 5 });
       expect((await target.backend.readHistory()).map((entry) => entry.id)).toEqual([
         'copied-one',
         'copied-two',
@@ -3117,6 +3348,13 @@ describe('Production Roost history semantics', () => {
       state: 'ready',
       turn: { items: [{ type: 'text', text: 'start:samesame' }] },
     });
+    expect(fixture.doc.handle!.doc.getMap('roostHistoryCursor').get('operationId')).toBeUndefined();
+    const progress = await fixture.backend.history.getPublication!();
+    expect(progress).toMatchObject({
+      historyCount: 1,
+      historyChange: { kind: 'changed', ids: ['retry-a'] },
+    });
+    expect(progress.checkpoint).toBeTruthy();
     await expect(
       fixture.backend.applyAgentBatch({
         ...input,
@@ -3358,8 +3596,10 @@ describe('Production Roost compact agent receipts', () => {
                   value: Buffer.from(JSON.stringify({ version: 1, digest: 'cd'.repeat(32) })),
                 }
               : {
-                  table: kind === 'renderer-v1'
-                    ? 'lody_renderer_history_changes_v1' : 'lody_renderer_history_changes_v2',
+                  table:
+                    kind === 'renderer-v1'
+                      ? 'lody_renderer_history_changes_v1'
+                      : 'lody_renderer_history_changes_v2',
                   key: Buffer.alloc(8),
                   value: Buffer.from(
                     JSON.stringify({
@@ -3380,7 +3620,8 @@ describe('Production Roost compact agent receipts', () => {
           const scope = Buffer.alloc(32, 0xab);
           if (mixed && !current)
             await raw.annotateCommit(scope, 0n, {
-              before: 0n, value: encodeRoostHistoryChange({ nonce: id, reset: false, ids: [] }),
+              before: 0n,
+              value: encodeRoostHistoryChange({ nonce: id, reset: false, ids: [] }),
             });
           const metadataBefore = await raw.readCommitMetadata(scope, 0n);
           const generation = new RoostHistoryGeneration(client, owner, id);
@@ -3388,7 +3629,12 @@ describe('Production Roost compact agent receipts', () => {
           await expect(generation.resolve()).rejects.toThrow(error);
           await expect(generation.lookupOperation(identity)).rejects.toThrow(error);
           await expect(
-            generation.commitPatches([], [agentReceiptPut(identity, 'ef'.repeat(32))], undefined, [])
+            generation.commitPatches(
+              [],
+              [agentReceiptPut(identity, 'ef'.repeat(32))],
+              undefined,
+              []
+            )
           ).rejects.toThrow(error);
           await expect(
             generation.replace([nativeUser('must-not-write')], 'must-not-activate')
@@ -3465,7 +3711,8 @@ describe('Production Roost compact agent receipts', () => {
       turn: { items: [{ text: input.contents.map((item) => item.text).join('') }] },
     });
     expect(await fixture.backend.history.readChanges!(checkpoint)).toMatchObject({
-      state: 'ready', ids: ['atomic-output'],
+      state: 'ready',
+      ids: ['atomic-output'],
     });
     await fixture.backend.applyAgentBatch({
       ...input,
@@ -4149,6 +4396,7 @@ describe.each(recoveryTurnCounts)('Roost cache recovery with %i retained turns',
       expect(revision).toBe(initialRevision + 1);
       const doc = new LoroDoc();
       const hints = doc.getMap('roostHistoryCursor');
+      hints.set('cursor', String(revision));
       hints.set('historyRevision', revision);
       hints.set('historyCount', count);
       hints.set('historyChangeJson', JSON.stringify({ kind: 'changed', ids: [initial.id] }));

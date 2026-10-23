@@ -892,31 +892,10 @@ export type SessionExternalHistoryCursorDocState = {
   storedHistoryBaseline?: string;
 };
 
-/** Durable notification cursor for a Roost-backed session history. The cursor
- * lives in the session control document so every renderer can observe a
- * history commit without polling the history store. */
+/** Logical changes in an owner history publication. */
 export type SessionHistoryChange =
   | { readonly kind: 'structure'; readonly from: number; readonly to: number }
   | { readonly kind: 'changed'; readonly ids: readonly string[] };
-
-export type SessionRoostHistoryCursorDocState = {
-  cursor: string;
-  operationId?: string;
-  historyRevision?: number;
-  historyCount?: number;
-  historyChangeJson?: string;
-};
-
-const sessionRoostHistoryCursorDocSchema = schema.LoroMap(
-  {
-    cursor: schema.String(),
-    operationId: schema.String({ required: false }),
-    historyRevision: schema.Number({ required: false }),
-    historyCount: schema.Number({ required: false }),
-    historyChangeJson: schema.String({ required: false }),
-  },
-  { required: false }
-);
 
 /**
  * Legacy/fallback launch config shape. New writers must not persist this per session;
@@ -1398,7 +1377,6 @@ export const sessionDocSchema = schema({
   ),
   preview: sessionPreviewDocSchema,
   externalHistoryCursor: sessionExternalHistoryCursorDocSchema,
-  roostHistoryCursor: sessionRoostHistoryCursorDocSchema,
   acpRuntimeConfig: sessionAcpRuntimeConfigDocSchema,
 });
 

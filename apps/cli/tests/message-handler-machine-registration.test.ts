@@ -192,7 +192,7 @@ describe('MessageHandler machine registration', () => {
       dshProviderIsolation: 1,
       terminalNotifications: 1,
       memoryProviders: 1,
-      sessionHistory: 2,
+      sessionHistory: 3,
       sessionHistoryIncremental: 1,
       sessionHistoryWatch: 1,
       sessionHistoryPatches: 1,
